@@ -1,0 +1,47 @@
+name: Build GameCoreParker
+
+on:
+  push:
+    branches: [ "main" ]
+  pull_request:
+    branches: [ "main" ]
+
+jobs:
+  build:
+    runs-on: windows-latest
+
+    env:
+      Solution_Name: GameCoreParker.sln
+      Project_Path: GameCoreParker/GameCoreParker.csproj # Update this to the actual relative path of your .csproj
+
+    steps:
+    - name: Checkout
+      uses: actions/checkout@v4
+      with:
+        fetch-depth: 0
+
+    - name: Install .NET 9.0
+      uses: actions/setup-dotnet@v4
+      with:
+        dotnet-version: 9.0.x
+
+    - name: Restore dependencies
+      run: dotnet restore ${{ env.Solution_Name }}
+
+    # We use 'publish' instead of 'build' to ensure SingleFile/NativeAOT logic is triggered
+    - name: Publish Singular EXE
+      run: |
+        dotnet publish ${{ env.Project_Path }} `
+          -c Release `
+          -r win-x64 `
+          --self-contained true `
+          -p:PublishSingleFile=true `
+          -p:PublishAot=true `
+          -o ./publish
+
+    # This uploads the singular .exe as a downloadable artifact in GitHub
+    - name: Upload Build Artifact
+      uses: actions/upload-artifact@v4
+      with:
+        name: GameCoreParker-Windows-x64
+        path: ./publish/*.exe
