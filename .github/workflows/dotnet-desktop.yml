@@ -4,11 +4,10 @@ on:
   push:
     branches: [ "main" ]
     tags:
-      - "v*" # Triggers release logic when you push a tag like v1.0.1
+      - "v*" 
   pull_request:
     branches: [ "main" ]
 
-# This is required to allow the action to create a Release and upload files
 permissions:
   contents: write
 
@@ -17,14 +16,12 @@ jobs:
     runs-on: windows-latest
 
     env:
-      Solution_Name: GameCoreParker.sln
-      Project_Path: GameCoreParker/GameCoreParker.csproj # Update to your actual .csproj path
+      # IMPORTANT: Ensure this path correctly points to your .csproj file
+      Project_Path: GameCoreParker/GameCoreParker.csproj 
 
     steps:
     - name: Checkout
       uses: actions/checkout@v4
-      with:
-        fetch-depth: 0
 
     - name: Install .NET 9.0
       uses: actions/setup-dotnet@v4
@@ -39,29 +36,36 @@ jobs:
           --self-contained true `
           -p:PublishSingleFile=true `
           -p:PublishAot=true `
-          -o ./publish
+          -o ./publish_output
 
-    # Optional: Rename the file to include the version if it's a tag
-    - name: Rename Output
+    # This step helps us see exactly what was created in the logs
+    - name: List Files (Debug)
+      run: dir ./publish_output
+
+    # Renames the EXE so the release isn't generic
+    - name: Prepare Artifact
       if: startsWith(github.ref, 'refs/tags/')
+      shell: pwsh
       run: |
-        Move-Item ./publish/*.exe ./publish/GameCoreParker-${{ github.ref_name }}.exe
+        $exe = Get-ChildItem "./publish_output/*.exe" | Select-Object -First 1
+        $newName = "GameCoreParker-${{ github.ref_name }}.exe"
+        Rename-Item -Path $exe.FullName -NewName $newName
+        # Move it to a clean folder for uploading
+        New-Item -ItemType Directory -Force -Path ./release_zip
+        Move-Item "./publish_output/$newName" ./release_zip/
 
-    # 1. Upload as a standard Artifact (Always happens)
-    - name: Upload Build Artifact
+    - name: Upload Build Artifact (Internal)
       uses: actions/upload-artifact@v4
       with:
-        name: GameCoreParker-Windows-x64
-        path: ./publish/*.exe
+        name: GameCoreParker-Binary
+        path: ./publish_output/*.exe
 
-    # 2. Upload to GitHub Releases (Only happens on tags v*)
-    - name: Create Release
+    - name: Create GitHub Release
       if: startsWith(github.ref, 'refs/tags/')
       uses: softprops/action-gh-release@v2
       with:
-        files: ./publish/*.exe
+        # We point directly to the folder containing the renamed EXE
+        files: ./release_zip/*.exe
         generate_release_notes: true
-        draft: false
-        prerelease: true
       env:
         GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
