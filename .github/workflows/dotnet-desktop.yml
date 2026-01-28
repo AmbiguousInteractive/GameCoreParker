@@ -65,7 +65,7 @@ jobs:
         # If it's a branch push, use the 'latest' tag. If it's a tag, use that tag name.
         tag_name: ${{ startsWith(github.ref, 'refs/tags/') && github.ref_name || 'latest' }}
         files: ./release_zip/*.exe
-        name: ${{ startsWith(github.ref, 'refs/tags/') && github.ref_name || 'Continuous Build' }}
+        name: ${{ startsWith(github.ref, 'refs/tags/') && github.ref_name || 'Latest Build' }}
         body: "Automated build from the latest commit on main."
         generate_release_notes: true
         allowUpdates: true
