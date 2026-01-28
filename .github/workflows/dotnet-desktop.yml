@@ -1,10 +1,16 @@
-name: Build GameCoreParker
+name: Build and Release GameCoreParker
 
 on:
   push:
     branches: [ "main" ]
+    tags:
+      - "v*" # Triggers release logic when you push a tag like v1.0.1
   pull_request:
     branches: [ "main" ]
+
+# This is required to allow the action to create a Release and upload files
+permissions:
+  contents: write
 
 jobs:
   build:
@@ -12,7 +18,7 @@ jobs:
 
     env:
       Solution_Name: GameCoreParker.sln
-      Project_Path: GameCoreParker/GameCoreParker.csproj # Update this to the actual relative path of your .csproj
+      Project_Path: GameCoreParker/GameCoreParker.csproj # Update to your actual .csproj path
 
     steps:
     - name: Checkout
@@ -25,10 +31,6 @@ jobs:
       with:
         dotnet-version: 9.0.x
 
-    - name: Restore dependencies
-      run: dotnet restore ${{ env.Solution_Name }}
-
-    # We use 'publish' instead of 'build' to ensure SingleFile/NativeAOT logic is triggered
     - name: Publish Singular EXE
       run: |
         dotnet publish ${{ env.Project_Path }} `
@@ -39,9 +41,27 @@ jobs:
           -p:PublishAot=true `
           -o ./publish
 
-    # This uploads the singular .exe as a downloadable artifact in GitHub
+    # Optional: Rename the file to include the version if it's a tag
+    - name: Rename Output
+      if: startsWith(github.ref, 'refs/tags/')
+      run: |
+        Move-Item ./publish/*.exe ./publish/GameCoreParker-${{ github.ref_name }}.exe
+
+    # 1. Upload as a standard Artifact (Always happens)
     - name: Upload Build Artifact
       uses: actions/upload-artifact@v4
       with:
         name: GameCoreParker-Windows-x64
         path: ./publish/*.exe
+
+    # 2. Upload to GitHub Releases (Only happens on tags v*)
+    - name: Create Release
+      if: startsWith(github.ref, 'refs/tags/')
+      uses: softprops/action-gh-release@v2
+      with:
+        files: ./publish/*.exe
+        generate_release_notes: true
+        draft: false
+        prerelease: true
+      env:
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
