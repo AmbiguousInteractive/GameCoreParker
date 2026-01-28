@@ -19,7 +19,9 @@ _If you wish to more easily exit the app when its hidden in the background, open
 
 If you want to have the application start with the window open for debugging or informational purposes, add the argument _**'-show'**_
 
-To tag an application to use these masks, refer to the hotkeys below.
+To tag an application to use these masks, refer to the hotkeys below. Once an application is tagged, it sets whichever mode you set, and is saved for future use. **The config file will be saved along where you placed the executable.** Next time you launch the application, it'll load those games and your CPU mask.
+
+**Make sure you have set your CPU mask during this set up or else the game will not set any mode.**
 
 # Hotkeys:
 **ALT + T** = Toggle the currently focused window to be added to the list of applications that'll have their affinities modified
