@@ -1,0 +1,17 @@
+﻿<Project Sdk="Microsoft.NET.Sdk">
+
+    <PropertyGroup>
+        <OutputType>WinExe</OutputType>
+        <TargetFramework>net9.0</TargetFramework>
+        <ImplicitUsings>enable</ImplicitUsings>
+        <Nullable>enable</Nullable>
+
+        <OptimizationPreference>Size</OptimizationPreference>
+        <InteropAssemblies>true</InteropAssemblies>
+        <PublishAot>true</PublishAot>
+        <DebugSymbols>false</DebugSymbols>
+        <DebugType>none</DebugType>
+        <EventSourceSupport>false</EventSourceSupport>
+    </PropertyGroup>
+
+</Project>
