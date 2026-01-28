@@ -6,6 +6,6 @@ Manage CPU cores automatically with hotkeys on specific applications (if the win
 # Hotkeys:
 **ALT + T** = Toggle the currently focused window to be added to the list of applications that'll have their affinities modified
 
-**ALT + A **= Toggle the currently focused window to be added to the list of applications that'll have it set via CPUSet
+**ALT + A** = Toggle the currently focused window to be added to the list of applications that'll have it set via CPUSet
 
-**CTRL + ALT + T **= Open the settings location.
+**CTRL + ALT + T** = Open the settings location.
