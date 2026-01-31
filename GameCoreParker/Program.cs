@@ -290,6 +290,8 @@ namespace GameOptimizer
                         if (target.Value == OptimizeMethod.Affinity)
                         {
                             p.ProcessorAffinity = (IntPtr)_config.AffinityMask;
+                            p.PriorityBoostEnabled = true;
+                            p.PriorityClass = ProcessPriorityClass.High;
                             applied = true;
                         }
                         else
