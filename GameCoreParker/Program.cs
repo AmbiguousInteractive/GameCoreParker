@@ -22,6 +22,8 @@ namespace GameOptimizer
         [DllImport("user32.dll")] private static extern IntPtr GetForegroundWindow();
         [DllImport("user32.dll")] private static extern uint GetWindowThreadProcessId(IntPtr hWnd, out uint lpdwProcessId);
         [DllImport("user32.dll")] private static extern bool ShowWindow(IntPtr hWnd, int nCmdShow);
+        [DllImport("user32.dll", CharSet = CharSet.Auto)] private static extern IntPtr SendMessageTimeout(IntPtr hWnd, uint Msg, IntPtr wParam, IntPtr lParam, uint fuFlags, uint uTimeout, out IntPtr lpdwResult);
+        
         [DllImport("kernel32.dll")] private static extern IntPtr LocalFree(IntPtr hMem);
         [DllImport("kernel32.dll")] private static extern IntPtr GetConsoleWindow();
         [DllImport("kernel32.dll", SetLastError = true)] private static extern bool AllocConsole();
@@ -35,8 +37,8 @@ namespace GameOptimizer
         // --- Power Management Imports ---
         [DllImport("powrprof.dll")] private static extern uint PowerSetActiveScheme(IntPtr root, ref Guid schemeGuid);
         [DllImport("powrprof.dll")] private static extern uint PowerDuplicateScheme(IntPtr root, ref Guid source, out IntPtr dest);
-        [DllImport("powrprof.dll")] private static extern uint PowerWriteACValueIndex(IntPtr root, ref Guid scheme, ref Guid sub, ref Guid setting, uint index);
-        [DllImport("powrprof.dll")] private static extern uint PowerWriteDCValueIndex(IntPtr root, ref Guid scheme, ref Guid sub, ref Guid setting, uint index);
+        [DllImport("powrprof.dll")] private static extern uint PowerWriteACValueIndex(IntPtr RootPowerKey, ref Guid SchemeGuid, ref Guid SubGroupOfPowerSettingsGuid, ref Guid PowerSettingGuid, uint AcValueIndex);
+        [DllImport("powrprof.dll")] private static extern uint PowerWriteDCValueIndex(IntPtr RootPowerKey, ref Guid SchemeGuid, ref Guid SubGroupOfPowerSettingsGuid, ref Guid PowerSettingGuid, uint DcValueIndex);
         [DllImport("powrprof.dll", CharSet = CharSet.Unicode)] private static extern uint PowerWriteFriendlyName(IntPtr root, ref Guid scheme, IntPtr sub, IntPtr set, byte[] buffer, uint bufSize);
         [DllImport("powrprof.dll", CharSet = CharSet.Unicode)] private static extern uint PowerReadFriendlyName(IntPtr root, ref Guid scheme, IntPtr sub, IntPtr set, IntPtr buffer, ref uint bufSize);
         [DllImport("powrprof.dll")] private static extern uint PowerDeleteScheme(IntPtr root, ref Guid scheme);
@@ -45,15 +47,32 @@ namespace GameOptimizer
         // Power GUIDs
         private static Guid GUID_BALANCED = new Guid("381b4222-f694-41f0-9685-ff5bb260df2e");
         private static Guid GUID_HIGH_PERF = new Guid("8c5e7fda-e8bf-4a96-9a85-a6e23a8c635c");
+        
+        
         private static Guid GUID_PROCESSOR_SUBGROUP = new Guid("54533251-82be-4824-96c1-47b60b740d00");
+        
+        
         private static Guid GUID_MIN_STATE = new Guid("893dee07-f0a1-4240-9aa5-720a4746d77c");
         private static Guid GUID_MAX_STATE = new Guid("bc5038f7-23e0-4960-96da-33abaf5935ec");
         private static Guid GUID_CORE_PARK_MIN = new Guid("0cc5b647-c1df-4637-891a-dec35c318583");
         private static Guid GUID_CORE_PARK_MAX = new Guid("ea0653f4-3860-43a3-8df7-9de8ca5d90c0");
         private static Guid GUID_EPP = new Guid("be337238-0d82-4146-a960-4f3749d470c7");
-        private static Guid GUID_BOOST_MODE = new Guid("be337238-0d82-4146-a960-4f3749d470c7");
+        private static Guid GUID_BOOST_MODE = new Guid("45bccd9e-141a-4286-905c-3091ccb31b3e");
+        private static Guid GUID_TIME_CHECK_INTERVAL = new Guid("4d2b0152-7d5c-4c4b-b583-de30ee3314b8");
+        private static Guid GUID_LATENCY_HINT = new Guid("619b7505-003b-4e82-b7a6-4dd29c300971");
+        
+        private static Guid GUID_IDLE_PROMOTE_THRESHOLD = new Guid("7b224883-ad40-4bc3-ad97-900508587d5b");
+        private static Guid GUID_IDLE_DEMOTE_THRESHOLD = new Guid("06cadf0e-64ed-448a-8927-ceb3261a20e1");
+
         private static Guid GUID_HETERO_POLICY = new Guid("7f2f5cfa-f973-4bf3-b514-239a1d210006");
         private static Guid GUID_HETERO_SHORT_POLICY = new Guid("93b131d2-0056-4235-866d-14a9a08e1f57");
+        
+        private const string REG_PATH_PRIORITY = @"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Multimedia\SystemProfile";
+        private const string REG_PATH_GAMES_TASK = @"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Multimedia\SystemProfile\Tasks\Games";
+        private const string REG_PRIORITY_CONTROL = @"System\CurrentControlSet\Control\PriorityControl";
+        
+        //Image File Execution Options (IFEO) Path
+        private const string IFEO_PATH = @"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Image File Execution Options";
         
         private const string POWER_PLAN_NAME = "GameCoreParker Performance";
         private const int STD_OUTPUT_HANDLE = -11;
@@ -156,6 +175,7 @@ namespace GameOptimizer
                             // Same method: Remove
                             _config.Apps.Remove(name);
                             _alreadySetStates.Remove($"{name}|{requestedMethod}");
+                            RemoveIfeoRegistry(name);
                             Console.Beep(400, 250);
                             Console.WriteLine($@"'{name}' REMOVED from optimization.");
                         }
@@ -164,6 +184,7 @@ namespace GameOptimizer
                             // Different method: Swap
                             _alreadySetStates.Remove($"{name}|{existingMethod}");
                             _config.Apps[name] = requestedMethod;
+                            ApplyIfeoRegistry(name);
                             Console.Beep(1000, 250);
                             Console.WriteLine($@"'{name}' SWAPPED to {requestedMethod} mode.");
                         }
@@ -172,6 +193,7 @@ namespace GameOptimizer
                     {
                         // New app
                         _config.Apps[name] = requestedMethod;
+                        ApplyIfeoRegistry(name);
                         Console.Beep(800, 250);
                         Console.WriteLine($@"'{name}' ADDED for {requestedMethod} optimization.");
                     }
@@ -231,7 +253,7 @@ namespace GameOptimizer
             if (_systemFoundGuid == Guid.Empty)
             {
                 IntPtr ptr = IntPtr.Zero;
-                if (PowerDuplicateScheme(IntPtr.Zero, ref GUID_HIGH_PERF, out ptr) == 0)
+                if (PowerDuplicateScheme(IntPtr.Zero, ref GUID_HIGH_PERF, out ptr) == 0) // Use Balanced as base
                 {
                     _systemFoundGuid = Marshal.PtrToStructure<Guid>(ptr);
                     byte[] bName = System.Text.Encoding.Unicode.GetBytes(POWER_PLAN_NAME);
@@ -239,14 +261,13 @@ namespace GameOptimizer
                     Marshal.FreeHGlobal(ptr);
                 }
             }
-
+            
             // Always enforce settings on the found/created GUID
             if (_systemFoundGuid != Guid.Empty) ApplyBitsumSettings(ref _systemFoundGuid);
         }
 
         private static void ApplyBitsumSettings(ref Guid scheme)
         {
-            // Min/Max State (100%) & Core Parking (100% Active)
             uint p100 = 100;
             PowerWriteACValueIndex(IntPtr.Zero, ref scheme, ref GUID_PROCESSOR_SUBGROUP, ref GUID_MIN_STATE, p100);
             PowerWriteDCValueIndex(IntPtr.Zero, ref scheme, ref GUID_PROCESSOR_SUBGROUP, ref GUID_MIN_STATE, p100);
@@ -256,18 +277,13 @@ namespace GameOptimizer
             PowerWriteDCValueIndex(IntPtr.Zero, ref scheme, ref GUID_PROCESSOR_SUBGROUP, ref GUID_CORE_PARK_MIN, p100);
             PowerWriteACValueIndex(IntPtr.Zero, ref scheme, ref GUID_PROCESSOR_SUBGROUP, ref GUID_CORE_PARK_MAX, p100);
             PowerWriteDCValueIndex(IntPtr.Zero, ref scheme, ref GUID_PROCESSOR_SUBGROUP, ref GUID_CORE_PARK_MAX, p100);
-
-            // EPP (Energy Performance Preference) -> 0 (Maximum Performance)
-            // This is the single most important setting for modern Intel/AMD chips
-            PowerWriteACValueIndex(IntPtr.Zero, ref scheme, ref GUID_PROCESSOR_SUBGROUP, ref GUID_EPP, 0);
-            PowerWriteDCValueIndex(IntPtr.Zero, ref scheme, ref GUID_PROCESSOR_SUBGROUP, ref GUID_EPP, 0);
-
-            // Processor Boost Mode -> 2 (Aggressive)
+            
+            PowerWriteACValueIndex(IntPtr.Zero, ref scheme, ref GUID_PROCESSOR_SUBGROUP, ref GUID_IDLE_PROMOTE_THRESHOLD, p100);
+            PowerWriteACValueIndex(IntPtr.Zero, ref scheme, ref GUID_PROCESSOR_SUBGROUP, ref GUID_IDLE_DEMOTE_THRESHOLD, p100);
+            
+            PowerWriteACValueIndex(IntPtr.Zero, ref scheme, ref GUID_PROCESSOR_SUBGROUP, ref GUID_TIME_CHECK_INTERVAL, 15);
+            PowerWriteACValueIndex(IntPtr.Zero, ref scheme, ref GUID_PROCESSOR_SUBGROUP, ref GUID_LATENCY_HINT, 0);
             PowerWriteACValueIndex(IntPtr.Zero, ref scheme, ref GUID_PROCESSOR_SUBGROUP, ref GUID_BOOST_MODE, 2);
-            PowerWriteDCValueIndex(IntPtr.Zero, ref scheme, ref GUID_PROCESSOR_SUBGROUP, ref GUID_BOOST_MODE, 2);
-
-            // Heterogeneous Policies (For Intel P/E Cores)
-            // These tell Windows to favor Performance cores for everything while gaming
             PowerWriteACValueIndex(IntPtr.Zero, ref scheme, ref GUID_PROCESSOR_SUBGROUP, ref GUID_HETERO_POLICY, 4);
             PowerWriteACValueIndex(IntPtr.Zero, ref scheme, ref GUID_PROCESSOR_SUBGROUP, ref GUID_HETERO_SHORT_POLICY, 0);
         }
@@ -277,6 +293,66 @@ namespace GameOptimizer
             ApplyPowerPlan(false);
             if (_systemFoundGuid != Guid.Empty) { PowerDeleteScheme(IntPtr.Zero, ref _systemFoundGuid); _systemFoundGuid = Guid.Empty; }
         }
+        
+        private static void SetRegistryTweaks(bool gaming)
+        {
+            try
+            {
+                // System Responsiveness (MMCSS)
+                // 0 = Gaming (Full resources), 20 = Desktop Default
+                using (var key = Registry.LocalMachine.OpenSubKey(REG_PATH_PRIORITY, true))
+                {
+                    key?.SetValue("SystemResponsiveness", gaming ? 0 : 20, RegistryValueKind.DWord);
+                }
+
+                // Win32 Priority Separation (Quantum)
+                // 38 (0x26) = Short, Variable, 3:1 ratio (Best for 9950X3D latency)
+                // 2 = Windows Default
+                using (var key = Registry.LocalMachine.OpenSubKey(REG_PRIORITY_CONTROL, true))
+                {
+                    key?.SetValue("Win32PrioritySeparation", gaming ? 38 : 2, RegistryValueKind.DWord);
+                }
+                
+                // 3. MMCSS Games Task Specifics
+                using (var key = Registry.LocalMachine.OpenSubKey(REG_PATH_GAMES_TASK, true))
+                {
+                    if (key != null)
+                    {
+                        // Set GPU Priority (8 is gaming default, ensures it hasn't been throttled)
+                        key.SetValue("GPU Priority", 8, RegistryValueKind.DWord);
+
+                        // Set Thread Priority (6 = Gaming, 2 = Windows Default)
+                        key.SetValue("Priority", gaming ? 6 : 2, RegistryValueKind.DWord);
+
+                        // Set Scheduling Category (High vs Medium)
+                        key.SetValue("Scheduling Category", gaming ? "High" : "Medium", RegistryValueKind.String);
+
+                        // Set SFIO (Special File I/O) Priority (High vs Normal)
+                        key.SetValue("SFIO Priority", gaming ? "High" : "Normal", RegistryValueKind.String);
+                    }
+                }
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine($"[Registry Error] {ex.Message} (Ensure running as Admin)");
+            }
+        }
+
+        private static bool IsCustomRegistrySet()
+        {
+            using (var key = Registry.LocalMachine.OpenSubKey(REG_PATH_PRIORITY, true))
+            {
+                if (key != null)
+                {
+                    var val = key.GetValue("SystemResponsiveness");
+                    if (val is int intVal)
+                    {
+                        return intVal != 20;
+                    };
+                }
+            }
+            return false;
+        }
 
         private static void ApplyPowerPlan(bool high)
         {
@@ -284,7 +360,63 @@ namespace GameOptimizer
             Guid target = high ? _systemFoundGuid : GUID_BALANCED;
             string method = high ? POWER_PLAN_NAME : "BALANCED";
             Console.WriteLine($"[{DateTime.Now:HH:mm:ss}] Power plan switched to {method} mode.");
-            if (target != Guid.Empty) PowerSetActiveScheme(IntPtr.Zero, ref target);
+            if (target != Guid.Empty)
+            {
+                PowerSetActiveScheme(IntPtr.Zero, ref target);
+            }
+        }
+        
+        private static void ApplyIfeoRegistry(string exeName)
+        {
+            try
+            {
+                // Ensure the EXE has an entry in IFEO
+                string rootPath = $@"{IFEO_PATH}\{exeName}.exe";
+                string perfPath = $@"{rootPath}\PerfOptions";
+
+                using (var key = Registry.LocalMachine.CreateSubKey(rootPath, true))
+                {
+                    if(key != null)
+                    {
+                        using (var perfKey = Registry.LocalMachine.CreateSubKey(perfPath, true))
+                        {
+                            if (perfKey != null)
+                            {
+                                perfKey.SetValue("CpuPriorityClass", 3, RegistryValueKind.DWord);
+                                // IoPriority: 3 = High
+                                perfKey.SetValue("IoPriority", 3, RegistryValueKind.DWord);
+                                // PagePriority (Memory): 5 = Highest
+                                perfKey.SetValue("PagePriority", 5, RegistryValueKind.DWord);
+                            }
+                        }
+                    }
+                }
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine($"[IFEO Error] Could not write to registry for {exeName}: {ex.Message}");
+            }
+        }
+        
+        private static void RemoveIfeoRegistry(string exeName)
+        {
+            try
+            {
+                string rootPath = $@"{IFEO_PATH}\{exeName}.exe";
+                using (var rootKey = Registry.LocalMachine.OpenSubKey(rootPath, true))
+                {
+                    if (rootKey != null)
+                    {
+                        rootKey.DeleteSubKey("PerfOptions", false);
+                        if (rootKey.SubKeyCount == 0 && rootKey.ValueCount == 0)
+                            Registry.LocalMachine.DeleteSubKey(rootPath, false);
+                    }
+                }
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine($"[IFEO Error] Could not remove registry for {exeName}: {ex.Message}");
+            }
         }
 
         private static void MonitorProcesses(object? state)
@@ -295,6 +427,7 @@ namespace GameOptimizer
             lock (_lock) { targets = new Dictionary<string, OptimizeMethod>(_config.Apps); }
 
             var cleanup = new List<string>();
+            
             foreach (var stateKey in _alreadySetStates)
             {
                 var inst = Process.GetProcessesByName(stateKey.Split('|')[0]);
@@ -314,8 +447,21 @@ namespace GameOptimizer
                     if (anyAppRunning) break; 
                 }
 
-                if (anyAppRunning && !_isPowerPlanActive) { FindOrCreatePowerPlan(); ApplyPowerPlan(true); _isPowerPlanActive = true; }
-                else if (!anyAppRunning && _isPowerPlanActive) { ApplyPowerPlan(false); _isPowerPlanActive = false; }
+                if (anyAppRunning && !_isPowerPlanActive)
+                {
+                    FindOrCreatePowerPlan();
+                    SetRegistryTweaks(true);   // Apply Gaming Registry
+                    ApplyPowerPlan(true);     // Switch to Custom Plan
+                    _isPowerPlanActive = true;
+                    Console.WriteLine($"[{DateTime.Now:HH:mm:ss}] [Power/Registry] High Performance Mode Engaged.");
+                }
+                else if (!anyAppRunning && _isPowerPlanActive)
+                {
+                    SetRegistryTweaks(false);  // Revert Registry to Defaults
+                    ApplyPowerPlan(false);     // Revert to Balanced
+                    _isPowerPlanActive = false;
+                    Console.WriteLine($"[{DateTime.Now:HH:mm:ss}] [Power/Registry] System Reverted to Balanced.");
+                }
             }
 
             foreach (var target in targets)
@@ -359,6 +505,7 @@ namespace GameOptimizer
             if (hConsole == IntPtr.Zero) { AllocConsole(); hConsole = GetConsoleWindow(); Console.SetOut(new StreamWriter(Console.OpenStandardOutput()){AutoFlush=true}); }
             ShowWindow(hConsole, 5);
             int cores = Environment.ProcessorCount;
+
             while (true)
             {
                 Console.Clear();
@@ -366,15 +513,17 @@ namespace GameOptimizer
                 Console.WriteLine("COMMANDS:");
                 Console.WriteLine($"  [P] Modify Power Plan: {(_config.UsePowerOptimization ? "ON" : "OFF")}");
                 Console.WriteLine($"  [A] Toggle Start with Windows: {(IsAutostartEnabled() ? "ENABLED" : "DISABLED")}");
+                Console.WriteLine($"  [R] Toggle Registry Edits: {( IsCustomRegistrySet() ? "ENABLED" : "DISABLED")}");
                 Console.WriteLine("  [0-15]   - Set specific core range");
                 Console.WriteLine("  [Number] - Toggle specific core index");
                 Console.WriteLine("  [S/Ent]  - Save and Return to Background");
-                Console.WriteLine("---------------------------------------\n");
+                Console.WriteLine("---------------------------------------\n"); 
                 for (int i = 0; i < cores; i++) { Console.Write($"[{((_config.AffinityMask & (1L << i)) != 0 ? "X" : " ")}] Core {i,-2} "); if ((i + 1) % 4 == 0) Console.WriteLine(); }
                 Console.Write("\nInput: ");
                 string input = Console.ReadLine()?.Trim().ToUpper() ?? "";
                 if (input == "S" || input == "") break;
                 if (input == "A") ToggleAutostart();
+                if (input == "R") SetRegistryTweaks(!IsCustomRegistrySet());
                 else if (input == "P") { _config.UsePowerOptimization = !_config.UsePowerOptimization; if (!_config.UsePowerOptimization) DeleteCustomPowerPlan(); }
                 else if (input.Contains("-")) _config.AffinityMask = ParseRange(input, cores); 
                 else if (int.TryParse(input, out int idx) && idx >= 0 && idx < cores) _config.AffinityMask ^= (1L << idx);
