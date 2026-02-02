@@ -4,6 +4,7 @@ using System.Diagnostics;
 using System.IO;
 using System.Linq;
 using System.Runtime.InteropServices;
+using System.Text;
 using System.Text.Json;
 using System.Text.Json.Serialization;
 using System.Threading;
@@ -43,6 +44,7 @@ namespace GameOptimizer
         [DllImport("powrprof.dll", CharSet = CharSet.Unicode)] private static extern uint PowerReadFriendlyName(IntPtr root, ref Guid scheme, IntPtr sub, IntPtr set, IntPtr buffer, ref uint bufSize);
         [DllImport("powrprof.dll")] private static extern uint PowerDeleteScheme(IntPtr root, ref Guid scheme);
         [DllImport("powrprof.dll")] private static extern uint PowerEnumerate(IntPtr root, IntPtr scheme, IntPtr sub, uint flags, uint index, ref Guid buffer, ref uint bufSize);
+        
         
         // Power GUIDs
         private static Guid GUID_BALANCED = new Guid("381b4222-f694-41f0-9685-ff5bb260df2e");
@@ -99,6 +101,7 @@ namespace GameOptimizer
         private const int SW_SHOW = 5;
 
         private static readonly string ConfigPath = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "config.json");
+        private static readonly string LogPath = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "log.txt");
         private static readonly string AppName = "GameCoreParker";
         private static ConfigData _config = new();
         private static readonly object _lock = new();
@@ -106,51 +109,64 @@ namespace GameOptimizer
 
         static void Main(string[] args)
         {
-            LoadConfig();
-            IntPtr hConsole = GetConsoleWindow();
-            bool forceShow = args.Any(arg => arg.Equals("-show", StringComparison.OrdinalIgnoreCase));
-            
-            if(!forceShow)
+            try
             {
-                ShowWindow(hConsole, SW_HIDE);
-                // "Stalk" the window for a few seconds to ensure Windows Terminal doesn't force it open
-                Task.Run(async () => { for (int i = 0; i < 5; i++) { ShowWindow(GetConsoleWindow(), SW_HIDE); await Task.Delay(500); } });
-            }
-            else
-            {
-                ShowWindow(hConsole, SW_SHOW);
-                Console.WriteLine("=== CoreGameParker - alpha ===");
-                Console.WriteLine("---------------------------------------");
-                ShowWindow(hConsole, 0);
-                Task.Run(async () => { for (int i = 0; i < 5; i++) { ShowWindow(GetConsoleWindow(), 0); await Task.Delay(500); } });
-            }
-
-
-            RegisterHotKey(IntPtr.Zero, HOTKEY_AFFINITY_TAG_ID, MOD_ALT, (uint)'T');         // Alt + T (Standard)
-            RegisterHotKey(IntPtr.Zero, HOTKEY_CPUSET_TAG_ID, MOD_ALT, (uint)'A');           // Alt + A (Anti-Cheat)
-            RegisterHotKey(IntPtr.Zero, HOTKEY_PROFILE_ID, MOD_ALT | MOD_CONTROL, (uint)'T'); // Ctrl + Alt + T (Settings)
-
-            RebuildCpuSetCache();
-            FindOrCreatePowerPlan();
-            
-            Console.WriteLine("GameCoreParker active. Use Alt+T/Alt+A to tag apps and Ctrl+Alt+T for settings.");
-            using Timer timer = new Timer(MonitorProcesses, null, 0, 5000);
-
-            NativeMsg msg = new NativeMsg();
-            while (true)
-            {
-                if (PeekMessage(out msg, IntPtr.Zero, 0, 0, 1))
+                LoadConfig();
+                IntPtr hConsole = GetConsoleWindow();
+                bool forceShow = args.Any(arg => arg.Equals("-show", StringComparison.OrdinalIgnoreCase));
+                
+                if (_config.EnableLogging)
                 {
-                    if (msg.message == WM_HOTKEY)
-                    {
-                        int id = msg.wParam.ToInt32();
-                        if (id == HOTKEY_AFFINITY_TAG_ID) ToggleTag(OptimizeMethod.Affinity);
-                        else if (id == HOTKEY_CPUSET_TAG_ID) ToggleTag(OptimizeMethod.CpuSet);
-                        else if (id == HOTKEY_PROFILE_ID) OpenProfileMenu(GetConsoleWindow());
-                    }
+                    Console.SetOut(new MultiTextWriter(Console.Out, LogPath));
+                    Console.WriteLine("--- GameCoreParker Service Started ---");
                 }
-                Thread.Sleep(10);
+                
+                if(!forceShow)
+                {
+                    ShowWindow(hConsole, SW_HIDE);
+                    // "Stalk" the window for a few seconds to ensure Windows Terminal doesn't force it open
+                    Task.Run(async () => { for (int i = 0; i < 5; i++) { ShowWindow(GetConsoleWindow(), SW_HIDE); await Task.Delay(500); } });
+                }
+                else
+                {
+                    ShowWindow(hConsole, SW_SHOW);
+                    Console.WriteLine("=== CoreGameParker - alpha ===");
+                    Console.WriteLine("---------------------------------------");
+                    ShowWindow(hConsole, 0);
+                    Task.Run(async () => { for (int i = 0; i < 5; i++) { ShowWindow(GetConsoleWindow(), 0); await Task.Delay(500); } });
+                }
+
+
+                RegisterHotKey(IntPtr.Zero, HOTKEY_AFFINITY_TAG_ID, MOD_ALT, (uint)'T');         // Alt + T (Standard)
+                RegisterHotKey(IntPtr.Zero, HOTKEY_CPUSET_TAG_ID, MOD_ALT, (uint)'A');           // Alt + A (Anti-Cheat)
+                RegisterHotKey(IntPtr.Zero, HOTKEY_PROFILE_ID, MOD_ALT | MOD_CONTROL, (uint)'T'); // Ctrl + Alt + T (Settings)
+
+                RebuildCpuSetCache();
+                FindOrCreatePowerPlan();
+                
+                Console.WriteLine("GameCoreParker active. Use Alt+T/Alt+A to tag apps and Ctrl+Alt+T for settings.");
+                using Timer timer = new Timer(MonitorProcesses, null, 0, 5000);
+
+                NativeMsg msg = new NativeMsg();
+                while (true)
+                {
+                    if (PeekMessage(out msg, IntPtr.Zero, 0, 0, 1))
+                    {
+                        if (msg.message == WM_HOTKEY)
+                        {
+                            int id = msg.wParam.ToInt32();
+                            if (id == HOTKEY_AFFINITY_TAG_ID) ToggleTag(OptimizeMethod.Affinity);
+                            else if (id == HOTKEY_CPUSET_TAG_ID) ToggleTag(OptimizeMethod.CpuSet);
+                            else if (id == HOTKEY_PROFILE_ID) OpenProfileMenu(GetConsoleWindow());
+                        }
+                    }
+                    Thread.Sleep(10);
+                }
             }
+            catch (Exception ex) {
+                Console.WriteLine("GameCoreParker failed to launch for reason:\n" + ex);
+            }
+            
         }
 
         private static void ToggleTag(OptimizeMethod requestedMethod)
@@ -162,6 +178,7 @@ namespace GameOptimizer
             {
                 using var proc = Process.GetProcessById((int)pid);
                 string name = proc.ProcessName;
+                string fullPath = proc.MainModule?.FileName ?? ""; // We need the full path for GameStore
 
                 if (string.IsNullOrEmpty(name) || name.Equals("Idle", StringComparison.OrdinalIgnoreCase) || name.Equals("explorer", StringComparison.OrdinalIgnoreCase))
                     return;
@@ -202,7 +219,7 @@ namespace GameOptimizer
             }
             catch { }
         }
-        
+                        
         private static void RebuildCpuSetCache()
         {
             uint bufferLength = 0;
@@ -268,15 +285,16 @@ namespace GameOptimizer
 
         private static void ApplyBitsumSettings(ref Guid scheme)
         {
+            uint p5 = 5;
             uint p100 = 100;
-            PowerWriteACValueIndex(IntPtr.Zero, ref scheme, ref GUID_PROCESSOR_SUBGROUP, ref GUID_MIN_STATE, p100);
-            PowerWriteDCValueIndex(IntPtr.Zero, ref scheme, ref GUID_PROCESSOR_SUBGROUP, ref GUID_MIN_STATE, p100);
+            /*PowerWriteACValueIndex(IntPtr.Zero, ref scheme, ref GUID_PROCESSOR_SUBGROUP, ref GUID_MIN_STATE, p5);
+            PowerWriteDCValueIndex(IntPtr.Zero, ref scheme, ref GUID_PROCESSOR_SUBGROUP, ref GUID_MIN_STATE, p5);
             PowerWriteACValueIndex(IntPtr.Zero, ref scheme, ref GUID_PROCESSOR_SUBGROUP, ref GUID_MAX_STATE, p100);
             PowerWriteDCValueIndex(IntPtr.Zero, ref scheme, ref GUID_PROCESSOR_SUBGROUP, ref GUID_MAX_STATE, p100);
-            PowerWriteACValueIndex(IntPtr.Zero, ref scheme, ref GUID_PROCESSOR_SUBGROUP, ref GUID_CORE_PARK_MIN, p100);
-            PowerWriteDCValueIndex(IntPtr.Zero, ref scheme, ref GUID_PROCESSOR_SUBGROUP, ref GUID_CORE_PARK_MIN, p100);
+            PowerWriteACValueIndex(IntPtr.Zero, ref scheme, ref GUID_PROCESSOR_SUBGROUP, ref GUID_CORE_PARK_MIN, p5);
+            PowerWriteDCValueIndex(IntPtr.Zero, ref scheme, ref GUID_PROCESSOR_SUBGROUP, ref GUID_CORE_PARK_MIN, p5);
             PowerWriteACValueIndex(IntPtr.Zero, ref scheme, ref GUID_PROCESSOR_SUBGROUP, ref GUID_CORE_PARK_MAX, p100);
-            PowerWriteDCValueIndex(IntPtr.Zero, ref scheme, ref GUID_PROCESSOR_SUBGROUP, ref GUID_CORE_PARK_MAX, p100);
+            PowerWriteDCValueIndex(IntPtr.Zero, ref scheme, ref GUID_PROCESSOR_SUBGROUP, ref GUID_CORE_PARK_MAX, p100);*/
             
             PowerWriteACValueIndex(IntPtr.Zero, ref scheme, ref GUID_PROCESSOR_SUBGROUP, ref GUID_IDLE_PROMOTE_THRESHOLD, p100);
             PowerWriteACValueIndex(IntPtr.Zero, ref scheme, ref GUID_PROCESSOR_SUBGROUP, ref GUID_IDLE_DEMOTE_THRESHOLD, p100);
@@ -294,15 +312,15 @@ namespace GameOptimizer
             if (_systemFoundGuid != Guid.Empty) { PowerDeleteScheme(IntPtr.Zero, ref _systemFoundGuid); _systemFoundGuid = Guid.Empty; }
         }
         
-        private static void SetRegistryTweaks(bool gaming)
+        private static void SetRegistryTweaks(bool enabled)
         {
             try
             {
                 // System Responsiveness (MMCSS)
-                // 0 = Gaming (Full resources), 20 = Desktop Default
+                // 10 = Gaming (Full resources), 20 = Desktop Default
                 using (var key = Registry.LocalMachine.OpenSubKey(REG_PATH_PRIORITY, true))
                 {
-                    key?.SetValue("SystemResponsiveness", gaming ? 0 : 20, RegistryValueKind.DWord);
+                    key?.SetValue("SystemResponsiveness", enabled ? 10: 20, RegistryValueKind.DWord);
                 }
 
                 // Win32 Priority Separation (Quantum)
@@ -310,7 +328,7 @@ namespace GameOptimizer
                 // 2 = Windows Default
                 using (var key = Registry.LocalMachine.OpenSubKey(REG_PRIORITY_CONTROL, true))
                 {
-                    key?.SetValue("Win32PrioritySeparation", gaming ? 38 : 2, RegistryValueKind.DWord);
+                    key?.SetValue("Win32PrioritySeparation", enabled ? 38 : 2, RegistryValueKind.DWord);
                 }
                 
                 // 3. MMCSS Games Task Specifics
@@ -322,13 +340,16 @@ namespace GameOptimizer
                         key.SetValue("GPU Priority", 8, RegistryValueKind.DWord);
 
                         // Set Thread Priority (6 = Gaming, 2 = Windows Default)
-                        key.SetValue("Priority", gaming ? 6 : 2, RegistryValueKind.DWord);
+                        key.SetValue("Priority", enabled ? 6 : 2, RegistryValueKind.DWord);
+                        
+                        //Set gaming affinity mask
+                        key.SetValue("Affinity", enabled ? _config.AffinityMask : 0, RegistryValueKind.DWord);
 
                         // Set Scheduling Category (High vs Medium)
-                        key.SetValue("Scheduling Category", gaming ? "High" : "Medium", RegistryValueKind.String);
+                        key.SetValue("Scheduling Category", enabled ? "High" : "Medium", RegistryValueKind.String);
 
                         // Set SFIO (Special File I/O) Priority (High vs Normal)
-                        key.SetValue("SFIO Priority", gaming ? "High" : "Normal", RegistryValueKind.String);
+                        key.SetValue("SFIO Priority", enabled ? "High" : "Normal", RegistryValueKind.String);
                     }
                 }
             }
@@ -502,7 +523,17 @@ namespace GameOptimizer
 
         private static void OpenProfileMenu(IntPtr hConsole)
         {
-            if (hConsole == IntPtr.Zero) { AllocConsole(); hConsole = GetConsoleWindow(); Console.SetOut(new StreamWriter(Console.OpenStandardOutput()){AutoFlush=true}); }
+            if (hConsole == IntPtr.Zero)
+            {
+                AllocConsole(); 
+                hConsole = GetConsoleWindow(); 
+                var standardOutput = new StreamWriter(Console.OpenStandardOutput()){AutoFlush=true};
+                
+                if (_config.EnableLogging)
+                    Console.SetOut(new MultiTextWriter(standardOutput, LogPath));
+                else
+                    Console.SetOut(standardOutput);
+            }
             ShowWindow(hConsole, 5);
             int cores = Environment.ProcessorCount;
 
@@ -543,12 +574,75 @@ namespace GameOptimizer
             return mask;
         }
 
-        private static bool IsAutostartEnabled() { using var k = Registry.CurrentUser.OpenSubKey(@"SOFTWARE\Microsoft\Windows\CurrentVersion\Run", false); return k?.GetValue(AppName) != null; }
-        private static void ToggleAutostart() { using var k = Registry.CurrentUser.OpenSubKey(@"SOFTWARE\Microsoft\Windows\CurrentVersion\Run", true); if (IsAutostartEnabled()) k?.DeleteValue(AppName, false); else k?.SetValue(AppName, $"\"{Process.GetCurrentProcess().MainModule?.FileName}\""); }
+        private static bool IsAutostartEnabled()
+        {
+            try
+            {
+                using var process = new Process();
+                process.StartInfo = new ProcessStartInfo
+                {
+                    FileName = "schtasks.exe",
+                    Arguments = $"/Query /TN \"{AppName}\"",
+                    UseShellExecute = false,
+                    CreateNoWindow = true,
+                    RedirectStandardOutput = true
+                };
+                process.Start();
+                string output = process.StandardOutput.ReadToEnd();
+                process.WaitForExit();
+                return process.ExitCode == 0;
+            }
+            catch { return false; }
+        }
+        
+        // Toggle autostart using Task Scheduler instead of previous method because you cannot start as admin
+        private static void ToggleAutostart()
+        {
+            string exePath = Process.GetCurrentProcess().MainModule?.FileName ?? "";
+            bool exists = IsAutostartEnabled();
+
+            try
+            {
+                if (exists)
+                {
+                    Process.Start(new ProcessStartInfo
+                    {
+                        FileName = "schtasks.exe",
+                        Arguments = $"/Delete /TN \"{AppName}\" /F",
+                        CreateNoWindow = true
+                    })?.WaitForExit();
+                    Console.WriteLine("[Autostart] Task Scheduler entry removed.");
+                }
+                else
+                {
+                    string args = $"/Create /TN \"{AppName}\" /TR \"'{exePath}'\" /SC ONLOGON /RL HIGHEST /F";
+                    Process.Start(new ProcessStartInfo
+                    {
+                        FileName = "schtasks.exe",
+                        Arguments = args,
+                        CreateNoWindow = true
+                    })?.WaitForExit();
+                    Console.WriteLine("[Autostart] Task Scheduler entry created (Elevated).");
+                }
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine($"[Autostart Error] {ex.Message}");
+            }
+            Thread.Sleep(800);
+            EmptyWorkingSet(Process.GetCurrentProcess().Handle);
+        }
+        
         private static void LoadConfig() { if (File.Exists(ConfigPath)) try { _config = JsonSerializer.Deserialize(File.ReadAllText(ConfigPath), SourceGenerationContext.Default.ConfigData) ?? new(); } catch { } }
         private static void SaveConfig() { File.WriteAllText(ConfigPath, JsonSerializer.Serialize(_config, SourceGenerationContext.Default.ConfigData)); }
     }
 
-    public class ConfigData { public Dictionary<string, OptimizeMethod> Apps { get; set; } = new(); public long AffinityMask { get; set; } = 0; public bool UsePowerOptimization { get; set; } = false; }
+    public class ConfigData
+    {
+        public Dictionary<string, OptimizeMethod> Apps { get; set; } = new(); 
+        public long AffinityMask { get; set; } = 0; 
+        public bool UsePowerOptimization { get; set; } = false;
+        public bool EnableLogging { get; set; } = false;
+    }
     [JsonSourceGenerationOptions(WriteIndented = true)] [JsonSerializable(typeof(ConfigData))] internal partial class SourceGenerationContext : JsonSerializerContext { }
 }
