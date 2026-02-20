@@ -108,6 +108,7 @@ namespace GameOptimizer
         {
             try
             {
+                EnsureSingleInstance();
                 LoadConfig();
                 IntPtr hConsole = GetConsoleWindow();
                 bool forceShow = args.Any(arg => arg.Equals("-show", StringComparison.OrdinalIgnoreCase));
@@ -164,6 +165,30 @@ namespace GameOptimizer
                 Console.WriteLine("GameCoreParker failed to launch for reason:\n" + ex);
             }
             
+        }
+        
+        private static void EnsureSingleInstance()
+        {
+            Process current = Process.GetCurrentProcess();
+            Process[] runningProcesses = Process.GetProcessesByName(current.ProcessName);
+
+            foreach (Process p in runningProcesses)
+            {
+                if (p.Id != current.Id)
+                {
+                    try
+                    {
+                        p.Kill();
+                        p.WaitForExit(2000); 
+                    }
+                    catch (Exception)
+                    { }
+                    finally
+                    {
+                        p.Dispose();
+                    }
+                }
+            }
         }
 
         private static void ToggleTag(OptimizeMethod requestedMethod)
