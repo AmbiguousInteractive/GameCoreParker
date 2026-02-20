@@ -28,7 +28,6 @@ namespace GameOptimizer
         [DllImport("kernel32.dll")] private static extern IntPtr LocalFree(IntPtr hMem);
         [DllImport("kernel32.dll")] private static extern IntPtr GetConsoleWindow();
         [DllImport("kernel32.dll", SetLastError = true)] private static extern bool AllocConsole();
-        [DllImport("kernel32.dll", SetLastError = true)] private static extern IntPtr GetStdHandle(int nStdHandle);
         [DllImport("kernel32.dll", SetLastError = true)] private static extern bool SetProcessDefaultCpuSets(IntPtr hProcess, [In] uint[] CpuSetIds, uint CpuSetIdCount);
         [DllImport("kernel32.dll", SetLastError = true)] private static extern IntPtr OpenProcess(uint processAccess, bool bInheritHandle, uint processId);
         [DllImport("kernel32.dll", SetLastError = true)] private static extern bool CloseHandle(IntPtr hObject);
@@ -45,29 +44,27 @@ namespace GameOptimizer
         [DllImport("powrprof.dll")] private static extern uint PowerDeleteScheme(IntPtr root, ref Guid scheme);
         [DllImport("powrprof.dll")] private static extern uint PowerEnumerate(IntPtr root, IntPtr scheme, IntPtr sub, uint flags, uint index, ref Guid buffer, ref uint bufSize);
         
-        
         // Power GUIDs
         private static Guid GUID_BALANCED = new Guid("381b4222-f694-41f0-9685-ff5bb260df2e");
         private static Guid GUID_HIGH_PERF = new Guid("8c5e7fda-e8bf-4a96-9a85-a6e23a8c635c");
         
+        // These GUIDs are used for processor performance states and core parking
+        private static Guid GUID_SUBGROUP_HARDDISK = new Guid("0b2d69d7-a2a1-449c-9680-f91c70521c60");
+        private static Guid GUID_OFFHARDDISK = new Guid("6738e2c4-e8a5-4a42-b16a-e040e769756e"); // Hard disk idle timeout | AC 0 DC 0
         
-        private static Guid GUID_PROCESSOR_SUBGROUP = new Guid("54533251-82be-4824-96c1-47b60b740d00");
+        private static Guid GUID_POWERPLANTYPE = new Guid("245d8541-3943-4422-b025-13a784f679b7"); // Power Plan Type | AC 1 DC 2 
+        
+        private static Guid GUID_SUBGROUP_PROCESSOR = new Guid("54533251-82be-4824-96c1-47b60b740d00");
+        private static Guid GUID_EPP = new Guid("36687f9e-e3a5-4dbf-b1dc-15eb381c6863"); // Energy Performance Preference (EPP) | AC 10 (Highest Performance) DC 10 (Highest Performance)
+        private static Guid GUID_PROCESSOR_PARKING_MIN = new Guid("0cc5b647-c1df-4637-891a-dec35c318583"); // Processor performance core parking min cores | AC 100 DC 100
+        private static Guid GUID_PROCESSOR_PARKING_P_MIN = new Guid("0cc5b647-c1df-4637-891a-dec35c318584"); // Processor performance core parking min cores for power efficiency | AC 100 DC 100
+        private static Guid GUID_PROCESSOR_STATE_MIN = new Guid("893dee8e-2bef-41e0-89c6-b55d0929964c"); // Processor state minimal state | AC 100 DC 100
+        private static Guid GUID_PROCESSOR_STATE_MAX = new Guid("bc5038f7-23e0-4960-96da-33abaf5935ed"); // Processor state maximum state | AC 100 DC 100
+        
+        private static Guid GUID_SUBGROUP_DISPLAY = new Guid("0cc5b647-c1df-4637-891a-dec35c318583");
+        private static Guid GUID_TURNDISPLAY_OFF = new Guid("6738e2c4-e8a5-4a42-b16a-e040e769756e"); // Display idle timeout | AC 0
         
         
-        private static Guid GUID_MIN_STATE = new Guid("893dee07-f0a1-4240-9aa5-720a4746d77c");
-        private static Guid GUID_MAX_STATE = new Guid("bc5038f7-23e0-4960-96da-33abaf5935ec");
-        private static Guid GUID_CORE_PARK_MIN = new Guid("0cc5b647-c1df-4637-891a-dec35c318583");
-        private static Guid GUID_CORE_PARK_MAX = new Guid("ea0653f4-3860-43a3-8df7-9de8ca5d90c0");
-        private static Guid GUID_EPP = new Guid("be337238-0d82-4146-a960-4f3749d470c7");
-        private static Guid GUID_BOOST_MODE = new Guid("45bccd9e-141a-4286-905c-3091ccb31b3e");
-        private static Guid GUID_TIME_CHECK_INTERVAL = new Guid("4d2b0152-7d5c-4c4b-b583-de30ee3314b8");
-        private static Guid GUID_LATENCY_HINT = new Guid("619b7505-003b-4e82-b7a6-4dd29c300971");
-        
-        private static Guid GUID_IDLE_PROMOTE_THRESHOLD = new Guid("7b224883-ad40-4bc3-ad97-900508587d5b");
-        private static Guid GUID_IDLE_DEMOTE_THRESHOLD = new Guid("06cadf0e-64ed-448a-8927-ceb3261a20e1");
-
-        private static Guid GUID_HETERO_POLICY = new Guid("7f2f5cfa-f973-4bf3-b514-239a1d210006");
-        private static Guid GUID_HETERO_SHORT_POLICY = new Guid("93b131d2-0056-4235-866d-14a9a08e1f57");
         
         private const string REG_PATH_PRIORITY = @"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Multimedia\SystemProfile";
         private const string REG_PATH_GAMES_TASK = @"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Multimedia\SystemProfile\Tasks\Games";
@@ -270,7 +267,7 @@ namespace GameOptimizer
             if (_systemFoundGuid == Guid.Empty)
             {
                 IntPtr ptr = IntPtr.Zero;
-                if (PowerDuplicateScheme(IntPtr.Zero, ref GUID_HIGH_PERF, out ptr) == 0) // Use Balanced as base
+                if (PowerDuplicateScheme(IntPtr.Zero, ref GUID_HIGH_PERF, out ptr) == 0) // Use High Performance
                 {
                     _systemFoundGuid = Marshal.PtrToStructure<Guid>(ptr);
                     byte[] bName = System.Text.Encoding.Unicode.GetBytes(POWER_PLAN_NAME);
@@ -285,25 +282,34 @@ namespace GameOptimizer
 
         private static void ApplyBitsumSettings(ref Guid scheme)
         {
-            uint p5 = 5;
-            uint p100 = 100;
-            /*PowerWriteACValueIndex(IntPtr.Zero, ref scheme, ref GUID_PROCESSOR_SUBGROUP, ref GUID_MIN_STATE, p5);
-            PowerWriteDCValueIndex(IntPtr.Zero, ref scheme, ref GUID_PROCESSOR_SUBGROUP, ref GUID_MIN_STATE, p5);
-            PowerWriteACValueIndex(IntPtr.Zero, ref scheme, ref GUID_PROCESSOR_SUBGROUP, ref GUID_MAX_STATE, p100);
-            PowerWriteDCValueIndex(IntPtr.Zero, ref scheme, ref GUID_PROCESSOR_SUBGROUP, ref GUID_MAX_STATE, p100);
-            PowerWriteACValueIndex(IntPtr.Zero, ref scheme, ref GUID_PROCESSOR_SUBGROUP, ref GUID_CORE_PARK_MIN, p5);
-            PowerWriteDCValueIndex(IntPtr.Zero, ref scheme, ref GUID_PROCESSOR_SUBGROUP, ref GUID_CORE_PARK_MIN, p5);
-            PowerWriteACValueIndex(IntPtr.Zero, ref scheme, ref GUID_PROCESSOR_SUBGROUP, ref GUID_CORE_PARK_MAX, p100);
-            PowerWriteDCValueIndex(IntPtr.Zero, ref scheme, ref GUID_PROCESSOR_SUBGROUP, ref GUID_CORE_PARK_MAX, p100);*/
+            //Harddisk
+            PowerWriteACValueIndex(IntPtr.Zero, ref scheme, ref GUID_SUBGROUP_HARDDISK, ref GUID_OFFHARDDISK, 0);
+            PowerWriteDCValueIndex(IntPtr.Zero, ref scheme, ref GUID_SUBGROUP_HARDDISK, ref GUID_OFFHARDDISK, 0);
             
-            PowerWriteACValueIndex(IntPtr.Zero, ref scheme, ref GUID_PROCESSOR_SUBGROUP, ref GUID_IDLE_PROMOTE_THRESHOLD, p100);
-            PowerWriteACValueIndex(IntPtr.Zero, ref scheme, ref GUID_PROCESSOR_SUBGROUP, ref GUID_IDLE_DEMOTE_THRESHOLD, p100);
+            //Power Plan Type
+            PowerWriteACValueIndex(IntPtr.Zero, ref scheme, ref GUID_POWERPLANTYPE, ref GUID_POWERPLANTYPE, 1);
+            PowerWriteDCValueIndex(IntPtr.Zero, ref scheme, ref GUID_POWERPLANTYPE, ref GUID_POWERPLANTYPE, 2);
             
-            PowerWriteACValueIndex(IntPtr.Zero, ref scheme, ref GUID_PROCESSOR_SUBGROUP, ref GUID_TIME_CHECK_INTERVAL, 15);
-            PowerWriteACValueIndex(IntPtr.Zero, ref scheme, ref GUID_PROCESSOR_SUBGROUP, ref GUID_LATENCY_HINT, 0);
-            PowerWriteACValueIndex(IntPtr.Zero, ref scheme, ref GUID_PROCESSOR_SUBGROUP, ref GUID_BOOST_MODE, 2);
-            PowerWriteACValueIndex(IntPtr.Zero, ref scheme, ref GUID_PROCESSOR_SUBGROUP, ref GUID_HETERO_POLICY, 4);
-            PowerWriteACValueIndex(IntPtr.Zero, ref scheme, ref GUID_PROCESSOR_SUBGROUP, ref GUID_HETERO_SHORT_POLICY, 0);
+            // Display
+            PowerWriteACValueIndex(IntPtr.Zero, ref scheme, ref GUID_SUBGROUP_DISPLAY, ref GUID_TURNDISPLAY_OFF, 0);
+            
+            
+            // Processor
+            PowerWriteACValueIndex(IntPtr.Zero, ref scheme, ref GUID_SUBGROUP_PROCESSOR, ref GUID_EPP, 10);
+            PowerWriteDCValueIndex(IntPtr.Zero, ref scheme, ref GUID_SUBGROUP_PROCESSOR, ref GUID_EPP, 10);
+            
+            PowerWriteACValueIndex(IntPtr.Zero, ref scheme, ref GUID_SUBGROUP_PROCESSOR, ref GUID_PROCESSOR_PARKING_MIN, 100);
+            PowerWriteDCValueIndex(IntPtr.Zero, ref scheme, ref GUID_SUBGROUP_PROCESSOR, ref GUID_PROCESSOR_PARKING_MIN, 100);
+            
+            PowerWriteACValueIndex(IntPtr.Zero, ref scheme, ref GUID_SUBGROUP_PROCESSOR, ref GUID_PROCESSOR_PARKING_P_MIN, 100);
+            PowerWriteDCValueIndex(IntPtr.Zero, ref scheme, ref GUID_SUBGROUP_PROCESSOR, ref GUID_PROCESSOR_PARKING_P_MIN, 100);
+            
+            PowerWriteACValueIndex(IntPtr.Zero, ref scheme, ref GUID_SUBGROUP_PROCESSOR, ref GUID_PROCESSOR_STATE_MIN, 100);
+            PowerWriteDCValueIndex(IntPtr.Zero, ref scheme, ref GUID_SUBGROUP_PROCESSOR, ref GUID_PROCESSOR_STATE_MIN, 100);
+            
+            PowerWriteACValueIndex(IntPtr.Zero, ref scheme, ref GUID_SUBGROUP_PROCESSOR, ref GUID_PROCESSOR_STATE_MAX, 100);
+            PowerWriteDCValueIndex(IntPtr.Zero, ref scheme, ref GUID_SUBGROUP_PROCESSOR, ref GUID_PROCESSOR_STATE_MAX, 100);
+            
         }
 
         private static void DeleteCustomPowerPlan()
@@ -471,14 +477,12 @@ namespace GameOptimizer
                 if (anyAppRunning && !_isPowerPlanActive)
                 {
                     FindOrCreatePowerPlan();
-                    SetRegistryTweaks(true);   // Apply Gaming Registry
                     ApplyPowerPlan(true);     // Switch to Custom Plan
                     _isPowerPlanActive = true;
                     Console.WriteLine($"[{DateTime.Now:HH:mm:ss}] [Power/Registry] High Performance Mode Engaged.");
                 }
                 else if (!anyAppRunning && _isPowerPlanActive)
                 {
-                    SetRegistryTweaks(false);  // Revert Registry to Defaults
                     ApplyPowerPlan(false);     // Revert to Balanced
                     _isPowerPlanActive = false;
                     Console.WriteLine($"[{DateTime.Now:HH:mm:ss}] [Power/Registry] System Reverted to Balanced.");
@@ -553,8 +557,8 @@ namespace GameOptimizer
                 Console.Write("\nInput: ");
                 string input = Console.ReadLine()?.Trim().ToUpper() ?? "";
                 if (input == "S" || input == "") break;
-                if (input == "A") ToggleAutostart();
-                if (input == "R") SetRegistryTweaks(!IsCustomRegistrySet());
+                else if (input == "A") ToggleAutostart();
+                else if (input == "R") SetRegistryTweaks(!IsCustomRegistrySet());
                 else if (input == "P") { _config.UsePowerOptimization = !_config.UsePowerOptimization; if (!_config.UsePowerOptimization) DeleteCustomPowerPlan(); }
                 else if (input.Contains("-")) _config.AffinityMask = ParseRange(input, cores); 
                 else if (int.TryParse(input, out int idx) && idx >= 0 && idx < cores) _config.AffinityMask ^= (1L << idx);
