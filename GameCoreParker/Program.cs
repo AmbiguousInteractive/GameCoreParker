@@ -24,8 +24,7 @@ namespace GameOptimizer
         [DllImport("user32.dll")] private static extern uint GetWindowThreadProcessId(IntPtr hWnd, out uint lpdwProcessId);
         [DllImport("user32.dll")] private static extern bool ShowWindow(IntPtr hWnd, int nCmdShow);
         [DllImport("user32.dll", CharSet = CharSet.Auto)] private static extern IntPtr SendMessageTimeout(IntPtr hWnd, uint Msg, IntPtr wParam, IntPtr lParam, uint fuFlags, uint uTimeout, out IntPtr lpdwResult);
-        
-        [DllImport("kernel32.dll")] private static extern IntPtr LocalFree(IntPtr hMem);
+
         [DllImport("kernel32.dll")] private static extern IntPtr GetConsoleWindow();
         [DllImport("kernel32.dll", SetLastError = true)] private static extern bool AllocConsole();
         [DllImport("kernel32.dll", SetLastError = true)] private static extern bool SetProcessDefaultCpuSets(IntPtr hProcess, [In] uint[] CpuSetIds, uint CpuSetIdCount);
@@ -85,6 +84,7 @@ namespace GameOptimizer
         private static uint[] _cachedTargetCpuSetIds = Array.Empty<uint>();
         private static Dictionary<int, uint> _coreToCpuSetIdMap = new();
         private static bool _isPowerPlanActive = false;
+        private static bool _backgroundIsolated = false; // Track background app state
         private static Guid _systemFoundGuid = Guid.Empty;
         
         private const int WM_HOTKEY = 0x0312;
@@ -135,14 +135,14 @@ namespace GameOptimizer
                 }
 
 
-                RegisterHotKey(IntPtr.Zero, HOTKEY_AFFINITY_TAG_ID, MOD_ALT, (uint)'T');         // Alt + T (Standard)
-                RegisterHotKey(IntPtr.Zero, HOTKEY_CPUSET_TAG_ID, MOD_ALT, (uint)'A');           // Alt + A (Anti-Cheat)
+                RegisterHotKey(IntPtr.Zero, HOTKEY_AFFINITY_TAG_ID, MOD_ALT| MOD_CONTROL, (uint)'9');         // Ctrl + Alt + [ (Standard)
+                RegisterHotKey(IntPtr.Zero, HOTKEY_CPUSET_TAG_ID, MOD_ALT| MOD_CONTROL, (uint)'0');           // Ctrl + Alt + ] (Anti-Cheat)
                 RegisterHotKey(IntPtr.Zero, HOTKEY_PROFILE_ID, MOD_ALT | MOD_CONTROL, (uint)'T'); // Ctrl + Alt + T (Settings)
 
                 RebuildCpuSetCache();
                 FindOrCreatePowerPlan();
                 
-                Console.WriteLine("GameCoreParker active. Use Alt+T/Alt+A to tag apps and Ctrl+Alt+T for settings.");
+                Console.WriteLine("GameCoreParker active. Use Ctrl+Alt+9 (Affinity Mode) / Ctrl+Alt+0 (CPUSet Mode) to tag apps and Ctrl+Alt+T for settings.");
                 using Timer timer = new Timer(MonitorProcesses, null, 0, 5000);
 
                 NativeMsg msg = new NativeMsg();
@@ -200,9 +200,11 @@ namespace GameOptimizer
             {
                 using var proc = Process.GetProcessById((int)pid);
                 string name = proc.ProcessName;
-                string fullPath = proc.MainModule?.FileName ?? ""; // We need the full path for GameStore
 
-                if (string.IsNullOrEmpty(name) || name.Equals("Idle", StringComparison.OrdinalIgnoreCase) || name.Equals("explorer", StringComparison.OrdinalIgnoreCase))
+                if (string.IsNullOrEmpty(name) || 
+                    name.Equals("Idle", StringComparison.OrdinalIgnoreCase) || 
+                    name.Equals("explorer", StringComparison.OrdinalIgnoreCase) ||
+                    name.Equals("GameCoreParker", StringComparison.OrdinalIgnoreCase))
                     return;
 
                 lock (_lock)
@@ -355,7 +357,7 @@ namespace GameOptimizer
                 }
 
                 // Win32 Priority Separation (Quantum)
-                // 38 (0x26) = Short, Variable, 3:1 ratio (Best for 9950X3D latency)
+                // 38
                 // 2 = Windows Default
                 using (var key = Registry.LocalMachine.OpenSubKey(REG_PRIORITY_CONTROL, true))
                 {
@@ -474,80 +476,98 @@ namespace GameOptimizer
         private static void MonitorProcesses(object? state)
         {
             if (_cachedTargetCpuSetIds.Length == 0 && _config.AffinityMask != 0) RebuildCpuSetCache();
-
             Dictionary<string, OptimizeMethod> targets;
-            lock (_lock) { targets = new Dictionary<string, OptimizeMethod>(_config.Apps); }
+            HashSet<string> backgroundApps;
+            lock (_lock) { targets = new Dictionary<string, OptimizeMethod>(_config.Apps); backgroundApps = new HashSet<string>(_config.BackgroundApps); }
 
+            // Cleanup stale
             var cleanup = new List<string>();
-            
-            foreach (var stateKey in _alreadySetStates)
-            {
-                var inst = Process.GetProcessesByName(stateKey.Split('|')[0]);
-                if (inst.Length == 0) cleanup.Add(stateKey);
+            foreach (var sk in _alreadySetStates) {
+                var inst = Process.GetProcessesByName(sk.Split('|')[0]);
+                if (inst.Length == 0) cleanup.Add(sk);
                 foreach (var i in inst) i.Dispose();
             }
-            foreach (var key in cleanup) _alreadySetStates.Remove(key);
-            
-            bool anyAppRunning = false;
-            if (_config.UsePowerOptimization)
-            {
-                foreach (var appName in targets.Keys)
-                {
-                    var inst = Process.GetProcessesByName(appName);
-                    if (inst.Length > 0) anyAppRunning = true;
-                    foreach (var i in inst) i.Dispose();
-                    if (anyAppRunning) break; 
-                }
+            foreach (var k in cleanup) _alreadySetStates.Remove(k);
 
-                if (anyAppRunning && !_isPowerPlanActive)
-                {
-                    FindOrCreatePowerPlan();
-                    ApplyPowerPlan(true);     // Switch to Custom Plan
-                    _isPowerPlanActive = true;
-                    Console.WriteLine($"[{DateTime.Now:HH:mm:ss}] [Power/Registry] High Performance Mode Engaged.");
-                }
-                else if (!anyAppRunning && _isPowerPlanActive)
-                {
-                    ApplyPowerPlan(false);     // Revert to Balanced
-                    _isPowerPlanActive = false;
-                    Console.WriteLine($"[{DateTime.Now:HH:mm:ss}] [Power/Registry] System Reverted to Balanced.");
-                }
+            bool gameRunning = false;
+            foreach (var app in targets.Keys) {
+                var inst = Process.GetProcessesByName(app);
+                if (inst.Length > 0) gameRunning = true;
+                foreach (var i in inst) i.Dispose();
+                if (gameRunning) break;
             }
 
-            foreach (var target in targets)
-            {
+            // 1. BACKGROUND ISOLATION (Other Affinity Mode)
+            long fullMask = (1L << Environment.ProcessorCount) - 1;
+            long inverseMask = fullMask ^ _config.AffinityMask;
+
+            if (gameRunning && !_backgroundIsolated) {
+                ApplyMaskToApps(backgroundApps, inverseMask);
+                _backgroundIsolated = true;
+                Console.WriteLine($"[{DateTime.Now:HH:mm:ss}] Game active. Background apps isolated to other CCD.");
+            } else if (!gameRunning && _backgroundIsolated) {
+                ApplyMaskToApps(backgroundApps, fullMask);
+                _backgroundIsolated = false;
+                Console.WriteLine($"[{DateTime.Now:HH:mm:ss}] Game closed. Background apps released.");
+            }
+
+            // 2. POWER PLAN
+            if (_config.UsePowerOptimization) {
+                if (gameRunning && !_isPowerPlanActive) { ApplyPowerPlan(true); _isPowerPlanActive = true; }
+                else if (!gameRunning && _isPowerPlanActive) { ApplyPowerPlan(false); _isPowerPlanActive = false; }
+            }
+
+            // 3. TARGET APPS
+            foreach (var target in targets) {
                 if (_alreadySetStates.Contains($"{target.Key}|{target.Value}")) continue;
                 var procs = Process.GetProcessesByName(target.Key);
                 bool applied = false;
-                foreach (var p in procs)
-                {
+                foreach (var p in procs) {
                     try {
-                        if (target.Value == OptimizeMethod.Affinity)
-                        {
-                            p.ProcessorAffinity = (IntPtr)_config.AffinityMask; 
-                            p.PriorityBoostEnabled = true; 
-                            p.PriorityClass = ProcessPriorityClass.High; 
-                            applied = true;
-                        }
-                        else
-                        {
+                        if (target.Value == OptimizeMethod.Affinity) { p.ProcessorAffinity = (IntPtr)_config.AffinityMask; p.PriorityClass = ProcessPriorityClass.High; applied = true; }
+                        else { 
                             IntPtr h = OpenProcess(0x3000, false, (uint)p.Id);
-                            if (h != IntPtr.Zero)
-                            {
-                                applied = SetProcessDefaultCpuSets(h, _cachedTargetCpuSetIds, (uint)_cachedTargetCpuSetIds.Length); 
-                                CloseHandle(h);
-                            }
+                            if (h != IntPtr.Zero) { applied = SetProcessDefaultCpuSets(h, _cachedTargetCpuSetIds, (uint)_cachedTargetCpuSetIds.Length); CloseHandle(h); }
                         }
                     } catch { } finally { p.Dispose(); }
                 }
-
-                if (applied)
-                {
-                    _alreadySetStates.Add($"{target.Key}|{target.Value}");
-                    Console.WriteLine($"[{DateTime.Now:HH:mm:ss}] Optimized '{target.Key}' via {target.Value}");
-                }
+                if (applied) _alreadySetStates.Add($"{target.Key}|{target.Value}");
             }
             EmptyWorkingSet(Process.GetCurrentProcess().Handle);
+        }
+        
+        private static void ApplyMaskToApps(HashSet<string> apps, long mask) {
+            foreach (var name in apps) {
+                var procs = Process.GetProcessesByName(name);
+                foreach (var p in procs) { try { p.ProcessorAffinity = (IntPtr)mask; } catch { } finally { p.Dispose(); } }
+            }
+        }
+        
+        private static void ManageGameList() {
+            while (true) {
+                Console.Clear();
+                Console.WriteLine("=== MANAGE GAMES ===");
+                foreach (var g in _config.Apps) Console.WriteLine($" - {g.Key} ({g.Value})");
+                Console.Write("\n'EXE Name' to remove, or 'EXE Name:Method' to add (e.g. Cemu:CpuSet OR Cemu:Affinity), or 'ENTER' to return to menu: \n");
+                string input = Console.ReadLine()?.Trim() ?? "";
+                if (input.ToUpper() == "ESC" || input == "") break;
+                if (input.Contains(":", StringComparison.OrdinalIgnoreCase)) {
+                    var p = input.Split(':');
+                    if (p.Length == 2 && Enum.TryParse<OptimizeMethod>(p[1], true, out var m)) { _config.Apps[p[0]] = m; ApplyIfeoRegistry(p[0]); }
+                } else if (_config.Apps.Remove(input)) RemoveIfeoRegistry(input);
+            }
+        }
+
+        private static void ManageBackgroundList() {
+            while (true) {
+                Console.Clear();
+                Console.WriteLine("=== BACKGROUND APPS (Isolation CCD) ===");
+                foreach (var a in _config.BackgroundApps) Console.WriteLine($" - {a}");
+                Console.Write("\n'EXE Name' to Add/Remove,  or 'ENTER' to return to menu: \n");
+                string input = Console.ReadLine()?.Trim() ?? "";
+                if (input.ToUpper() == "ESC" || input == "") break;
+                if (!_config.BackgroundApps.Add(input)) _config.BackgroundApps.Remove(input);
+            }
         }
 
         private static void OpenProfileMenu(IntPtr hConsole)
@@ -566,14 +586,15 @@ namespace GameOptimizer
             ShowWindow(hConsole, 5);
             int cores = Environment.ProcessorCount;
 
-            while (true)
-            {
+            while (true) {
                 Console.Clear();
                 Console.WriteLine("=== SETTINGS ===");
                 Console.WriteLine("COMMANDS:");
                 Console.WriteLine($"  [P] Modify Power Plan: {(_config.UsePowerOptimization ? "ON" : "OFF")}");
                 Console.WriteLine($"  [A] Toggle Start with Windows: {(IsAutostartEnabled() ? "ENABLED" : "DISABLED")}");
                 Console.WriteLine($"  [R] Toggle Registry Edits: {( IsCustomRegistrySet() ? "ENABLED" : "DISABLED")}");
+                Console.WriteLine($"  [G] Manage Game List ({_config.Apps.Count} apps)");
+                Console.WriteLine($"  [B] Manage Background App List ({_config.BackgroundApps.Count} apps)");
                 Console.WriteLine("  [0-15]   - Set specific core range");
                 Console.WriteLine("  [Number] - Toggle specific core index");
                 Console.WriteLine("  [S/Ent]  - Save and Return to Background");
@@ -582,6 +603,8 @@ namespace GameOptimizer
                 Console.Write("\nInput: ");
                 string input = Console.ReadLine()?.Trim().ToUpper() ?? "";
                 if (input == "S" || input == "") break;
+                else if (input == "G") ManageGameList();
+                else if (input == "B") ManageBackgroundList();
                 else if (input == "A") ToggleAutostart();
                 else if (input == "R") SetRegistryTweaks(!IsCustomRegistrySet());
                 else if (input == "P") { _config.UsePowerOptimization = !_config.UsePowerOptimization; if (!_config.UsePowerOptimization) DeleteCustomPowerPlan(); }
@@ -666,9 +689,9 @@ namespace GameOptimizer
         private static void SaveConfig() { File.WriteAllText(ConfigPath, JsonSerializer.Serialize(_config, SourceGenerationContext.Default.ConfigData)); }
     }
 
-    public class ConfigData
-    {
+    public class ConfigData {
         public Dictionary<string, OptimizeMethod> Apps { get; set; } = new(); 
+        public HashSet<string> BackgroundApps { get; set; } = new();
         public long AffinityMask { get; set; } = 0; 
         public bool UsePowerOptimization { get; set; } = false;
         public bool EnableLogging { get; set; } = false;
