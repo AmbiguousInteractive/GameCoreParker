@@ -1,4 +1,4 @@
-﻿namespace GameOptimizer;
+﻿using System.Text;
 
 public class MultiTextWriter : TextWriter
 {
@@ -6,14 +6,23 @@ public class MultiTextWriter : TextWriter
     private readonly StreamWriter _fileWriter;
     private readonly object _logLock = new();
 
-    public override System.Text.Encoding Encoding => System.Text.Encoding.UTF8;
+    public override Encoding Encoding => Encoding.UTF8;
 
     public MultiTextWriter(TextWriter baseWriter, string logPath)
     {
         _baseWriter = baseWriter;
-        // Open for appending, allow other apps to read the log while we write
         var stream = new FileStream(logPath, FileMode.Append, FileAccess.Write, FileShare.ReadWrite);
         _fileWriter = new StreamWriter(stream) { AutoFlush = true };
+    }
+
+    // ADD THIS: Capture grid data that doesn't use NewLines
+    public override void Write(string? value)
+    {
+        lock (_logLock)
+        {
+            _baseWriter.Write(value);
+            _fileWriter.Write(value);
+        }
     }
 
     public override void WriteLine(string? value)
