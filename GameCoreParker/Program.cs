@@ -21,8 +21,15 @@ namespace GameOptimizer
         [DllImport("user32.dll")] private static extern IntPtr GetForegroundWindow();
         [DllImport("user32.dll")] private static extern uint GetWindowThreadProcessId(IntPtr hWnd, out uint lpdwProcessId);
         [DllImport("user32.dll")] private static extern bool ShowWindow(IntPtr hWnd, int nCmdShow);
-        [DllImport("user32.dll", CharSet = CharSet.Auto)] private static extern IntPtr SendMessageTimeout(IntPtr hWnd, uint Msg, IntPtr wParam, IntPtr lParam, uint fuFlags, uint uTimeout, out IntPtr lpdwResult);
+        [DllImport("kernel32.dll", SetLastError = true)] private static extern bool GetConsoleMode(IntPtr hConsoleHandle, out uint lpMode);
+        [DllImport("kernel32.dll", SetLastError = true)] private static extern bool SetConsoleMode(IntPtr hConsoleHandle, uint dwMode);
+        [DllImport("kernel32.dll", SetLastError = true)] private static extern IntPtr GetStdHandle(int nStdHandle);
+        
+        private const uint ENABLE_QUICK_EDIT_MODE = 0x0040;
+        private const uint ENABLE_EXTENDED_FLAGS = 0x0080;
+        private const int STD_INPUT_HANDLE = -10;
 
+        
         [DllImport("kernel32.dll")] private static extern IntPtr GetConsoleWindow();
         [DllImport("kernel32.dll", SetLastError = true)] private static extern bool AllocConsole();
         [DllImport("kernel32.dll", SetLastError = true)] private static extern bool SetProcessDefaultCpuSets(IntPtr hProcess, [In] uint[] CpuSetIds, uint CpuSetIdCount);
@@ -153,6 +160,11 @@ namespace GameOptimizer
         private static IntPtr[]? _pdhUsageCounters;
         private static IntPtr[]? _pdhFreqCounters;
         private static float _baseClockMHz = 0;
+        private static string _currentInput = "";
+        private static bool _needsRedraw = true;
+
+        private static string _currentGame = "";
+        private static OptimizeMethod _currentGameOptimizeMethod = OptimizeMethod.Affinity;
 
         private static readonly string ConfigPath = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "config.json");
         private static readonly string LogPath = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "log.txt");
@@ -160,6 +172,10 @@ namespace GameOptimizer
         private static ConfigData _config = new();
         private static readonly object _lock = new();
         private static HashSet<string> _alreadySetStates = new();
+        
+        private static bool _isMenuOpen = false;
+        internal static bool IsMenuOpenInternal => _isMenuOpen;
+        private static TextWriter _rawConsole = Console.Out; // Captures the direct console stream
 
         static void Main(string[] args)
         {
@@ -168,13 +184,15 @@ namespace GameOptimizer
                 EnsureSingleInstance();
                 LoadConfig();
                 IntPtr hConsole = GetConsoleWindow();
+                _rawConsole = Console.Out; 
+                
                 bool forceShow = args.Any(arg => arg.Equals("-show", StringComparison.OrdinalIgnoreCase));
                 
                 AppDomain.CurrentDomain.ProcessExit += OnProcessExit;
                 
                 if (_config.EnableLogging)
                 {
-                    Console.SetOut(new MultiTextWriter(Console.Out, LogPath));
+                    Console.SetOut(new MultiTextWriter(_rawConsole, LogPath));
                     Console.WriteLine("--- GameCoreParker Service Started ---");
                 }
                 
@@ -309,15 +327,14 @@ namespace GameOptimizer
             // Prime the data twice
             PdhCollectQueryData(_pdhQuery);
             Thread.Sleep(100);
-            PdhCollectQueryData(_pdhQuery);
         }
         
         private static void DetectCcdTopology()
         {
             _ccdMasks.Clear();
             uint returnLength = 0;
-            // Call once to get required length
-            GetLogicalProcessorInformationEx(2, IntPtr.Zero, ref returnLength); // 2 = RelationCache
+
+            GetLogicalProcessorInformationEx(2, IntPtr.Zero, ref returnLength);
 
             IntPtr buffer = Marshal.AllocHGlobal((int)returnLength);
             try
@@ -328,9 +345,6 @@ namespace GameOptimizer
                     while (offset < returnLength)
                     {
                         var info = Marshal.PtrToStructure<SYSTEM_LOGICAL_PROCESSOR_INFORMATION_EX>(buffer + offset);
-                
-                        // We are looking for L3 Cache (Level 3)
-                        // The CacheRelationship struct starts 8 bytes after the start of InfoEx
                         var cacheInfo = Marshal.PtrToStructure<CACHE_RELATIONSHIP>(buffer + offset + 8);
                 
                         if (cacheInfo.Level == 3)
@@ -342,92 +356,10 @@ namespace GameOptimizer
                 }
             }
             finally { Marshal.FreeHGlobal(buffer); }
-
-            // Fallback: If topology fails, treat the whole CPU as one CCD
             if (_ccdMasks.Count == 0)
             {
                 _ccdMasks.Add((1L << Environment.ProcessorCount) - 1);
             }
-    
-            Console.WriteLine($"[Topology] Detected {_ccdMasks.Count} CCD(s) based on L3 Cache boundaries.");
-        }
-
-        private static void ShowCoreMonitor(IntPtr hConsole)
-        {
-            Console.Clear();
-            try { InitializeMonitorData(); }
-            catch (Exception ex) { Console.WriteLine($"Monitor Error: {ex.Message}"); Thread.Sleep(3000); return; }
-            AdjustConsoleWindowSize(); 
-            
-            Console.CursorVisible = false;
-            int maxRows = _ccdMasks.Max(mask => GetPopCount((ulong)mask));
-
-            while (!Console.KeyAvailable)
-            {
-                PdhCollectQueryData(_pdhQuery);
-                Console.SetCursorPosition(0, 0);
-                Console.WriteLine($"=== CPU REAL-TIME MONITOR | CCDs: {_ccdMasks.Count} | [Any Key] Exit ===\n");
-
-                for (int c = 0; c < _ccdMasks.Count; c++)
-                {
-                    if(c == 0)
-                        Console.Write($"{"CCD " + c + " (L3)",-32} | ");
-                    else
-                        Console.Write($"{"CCD " + c,-32} | ");
-                }
-                Console.WriteLine("\n" + new string('-', 34 * _ccdMasks.Count));
-                Console.WriteLine("");
-    
-                for (int row = 0; row < maxRows; row++)
-                {
-                    for (int ccdIdx = 0; ccdIdx < _ccdMasks.Count; ccdIdx++)
-                    {
-                        int coreIdx = GetCoreIndexInCcd(ccdIdx, row);
-                        if (coreIdx != -1)
-                        {
-                            PdhGetFormattedCounterValue(_pdhUsageCounters![coreIdx], 0x00000200, out _, out var utilVal);
-                            double util = utilVal.doubleValue;
-                            double mhz = (util / 100.0) * _baseClockMHz;
-                            double displayLoad = Math.Clamp(util, 0, 100);
-                            
-                            ConsoleColor color = ConsoleColor.Green;
-                            if (displayLoad > 80) color = ConsoleColor.Red;
-                            else if (displayLoad > 40) color = ConsoleColor.Yellow;
-                            
-                            if ((_config.AffinityMask & (1L << coreIdx)) != 0) {
-                                Console.ForegroundColor = ConsoleColor.Magenta;
-                                Console.Write("*");
-                            } else Console.Write(" ");
-                            
-                            Console.ForegroundColor = ConsoleColor.Gray;
-                            Console.Write($"C{coreIdx:D2}[");
-                            
-                            Console.ForegroundColor = color;
-                            int filled = (int)Math.Round(displayLoad / 10.0);
-                            Console.Write(new string('|', filled).PadRight(10, '.'));
-                            
-                            Console.ForegroundColor = ConsoleColor.Gray;
-                            Console.Write($"] ");
-
-                            Console.ForegroundColor = color;
-                            Console.Write($"{displayLoad,5:F1}% ");
-                            
-                            Console.ForegroundColor = ConsoleColor.White;
-                            Console.Write($"{Math.Clamp(mhz, 0, 9999),4:F0} MHz");
-                            
-                            Console.ForegroundColor = ConsoleColor.DarkGray;
-                            Console.Write(" | ");
-                        }
-                        else { Console.Write(new string(' ', 36) + " | "); }
-                    }
-                    Console.WriteLine();
-                    Console.ResetColor();
-                }
-                Thread.Sleep(800); 
-            }
-            Console.ReadKey(true);
-            Console.CursorVisible = true;
-            Console.Clear();
         }
         
         private static int GetPopCount(ulong value)
@@ -777,6 +709,8 @@ namespace GameOptimizer
                 var inst = Process.GetProcessesByName(app.Key);
                 if (inst.Length > 0) {
                     gameRunning = true;
+                    _currentGame = app.Key;
+                    _currentGameOptimizeMethod = app.Value;
                     if (app.Value == OptimizeMethod.InverseAffinity || app.Value == OptimizeMethod.InverseCpuSet)
                         isInverseGame = true;
                 }
@@ -790,12 +724,13 @@ namespace GameOptimizer
             long bgMask = isInverseGame ? _config.AffinityMask : inverseMask;
 
             if (gameRunning && !_backgroundIsolated) {
-                ApplyMaskToApps(backgroundApps, inverseMask);
+                ApplyMaskToApps(backgroundApps, bgMask);
                 _backgroundIsolated = true;
                 Console.WriteLine($"[{DateTime.Now:HH:mm:ss}] Game active. Background apps isolated to other CCD.");
             } else if (!gameRunning && _backgroundIsolated) {
                 ApplyMaskToApps(backgroundApps, fullMask);
                 _backgroundIsolated = false;
+                _currentGame = "";
                 Console.WriteLine($"[{DateTime.Now:HH:mm:ss}] Game closed. Background apps released.");
             }
 
@@ -837,61 +772,142 @@ namespace GameOptimizer
             }
         }
         
-        private static void ManageGameList() {
-            while (true) {
-                Console.Clear();
-                Console.WriteLine("=== MANAGE GAMES ===");
-                foreach (var g in _config.Apps)
+        private static string ReadInputManually(string prompt)
+        {
+            _rawConsole.Write(prompt);
+            StringBuilder input = new StringBuilder();
+            Console.CursorVisible = true; // Show cursor while typing
+
+            while (true)
+            {
+                if (Console.KeyAvailable)
                 {
-                    ConsoleColor color = ConsoleColor.White;
-                    switch (g.Value)
+                    var key = Console.ReadKey(true);
+
+                    if (key.Key == ConsoleKey.Enter)
                     {
-                        case OptimizeMethod.Affinity:
-                            color = ConsoleColor.Green;
-                            break;
-                        case OptimizeMethod.CpuSet:
-                            color = ConsoleColor.Magenta;
-                            break;
-                        case OptimizeMethod.InverseAffinity:
-                            color = ConsoleColor.DarkBlue;
-                            break;
-                        case OptimizeMethod.InverseCpuSet:
-                            color = ConsoleColor.DarkYellow;
-                            break;
-                        default:
-                            color = ConsoleColor.White;
-                            break;
+                        _rawConsole.WriteLine();
+                        break;
                     }
-                    Console.ForegroundColor = color;
-                    Console.WriteLine($" - {g.Key} ({g.Value})");
+                    if (key.Key == ConsoleKey.Backspace)
+                    {
+                        if (input.Length > 0)
+                        {
+                            input.Remove(input.Length - 1, 1);
+                            // Standard console backspace sequence: Back, Space, Back
+                            _rawConsole.Write("\b \b");
+                        }
+                    }
+                    else if (!char.IsControl(key.KeyChar))
+                    {
+                        input.Append(key.KeyChar);
+                        _rawConsole.Write(key.KeyChar.ToString());
+                    }
                 }
+                Thread.Sleep(5); // Ultra-low latency
+            }
+
+            Console.CursorVisible = false; // Hide cursor again
+            return input.ToString().Trim();
+        }
+        
+        private static void ManageGameList()
+        {
+            while (true)
+            {
+                Console.Clear();
+                _rawConsole.WriteLine("=== MANAGE GAMES ===");
+        
+                lock (_lock)
+                {
+                    foreach (var g in _config.Apps)
+                        WriteCurrentGameInfo(g.Key, g.Value);
+                }
+
                 Console.ForegroundColor = ConsoleColor.White;
-                string[] methodNames = Enum.GetNames(typeof(OptimizeMethod));
-                string joinedNames = string.Join(", ", methodNames);
-                Console.Write("\nAvailable Methods: " + joinedNames + "\n");
-                
-                Console.WriteLine("'EXE Name' to remove, or 'EXE Name:Method' to add (e.g. Cemu:CpuSet), or 'ENTER' to return to menu:");
-                string input = Console.ReadLine()?.Trim() ?? "";
-                if (input.ToUpper() == "ESC" || input == "") break;
-                if (input.Contains(":", StringComparison.OrdinalIgnoreCase)) {
-                    var p = input.Split(':');
-                    if (p.Length == 2 && Enum.TryParse<OptimizeMethod>(p[1], true, out var m)) { _config.Apps[p[0]] = m; ApplyIfeoRegistry(p[0]); }
-                } else if (_config.Apps.Remove(input)) RemoveIfeoRegistry(input);
-                
-                AdjustConsoleWindowSize();
+                string joinedNames = string.Join(", ", Enum.GetNames(typeof(OptimizeMethod)));
+                _rawConsole.WriteLine($"\nAvailable Methods: {joinedNames}");
+                _rawConsole.WriteLine("'EXE Name' to remove, or 'EXE Name:Method' to add (e.g. Cemu:CpuSet)");
+        
+                // FIX: Use manual reader instead of ReadLine
+                string input = ReadInputManually("ENTER to return or Type Command: ");
+        
+                if (string.IsNullOrEmpty(input) || input.Equals("ESC", StringComparison.OrdinalIgnoreCase))
+                {
+                    Console.Clear();
+                    break;
+                }
+
+                lock (_lock)
+                {
+                    if (input.Contains(":", StringComparison.OrdinalIgnoreCase))
+                    {
+                        var p = input.Split(':');
+                        if (p.Length == 2 && Enum.TryParse<OptimizeMethod>(p[1], true, out var m))
+                        {
+                            _config.Apps[p[0]] = m;
+                            ApplyIfeoRegistry(p[0]); // Fixed: Pass 'true' to enable
+                        }
+                    }
+                    else if (_config.Apps.Remove(input))
+                    {
+                        RemoveIfeoRegistry(input); // Fixed: Pass 'false' to remove
+                    }
+                }
+                SaveConfig();
             }
         }
 
-        private static void ManageBackgroundList() {
-            while (true) {
+        private static void WriteCurrentGameInfo(string name, OptimizeMethod method, bool clearLine = false)
+        {
+            Console.ForegroundColor = method switch
+            {
+                OptimizeMethod.Affinity => ConsoleColor.Green,
+                OptimizeMethod.CpuSet => ConsoleColor.Magenta,
+                OptimizeMethod.InverseAffinity => ConsoleColor.DarkBlue,
+                OptimizeMethod.InverseCpuSet => ConsoleColor.DarkYellow,
+                _ => ConsoleColor.White
+            };
+            string output = $" - {name} ({method})";
+            
+            if (clearLine)
+                _rawConsole.WriteLine(output.PadRight(Console.WindowWidth));
+            else
+                _rawConsole.WriteLine(output);
+
+            Console.ResetColor();
+        }
+
+        private static void ManageBackgroundList()
+        {
+            while (true)
+            {
                 Console.Clear();
-                Console.WriteLine("=== BACKGROUND APPS (Isolation CCD) ===");
-                foreach (var a in _config.BackgroundApps) Console.WriteLine($" - {a}");
-                Console.WriteLine("'EXE Name' to Add/Remove,  or 'ENTER' to return to menu: \n");
-                string input = Console.ReadLine()?.Trim() ?? "";
-                if (input.ToUpper() == "ESC" || input == "") break;
-                if (!_config.BackgroundApps.Add(input)) _config.BackgroundApps.Remove(input);
-                AdjustConsoleWindowSize();
+                _rawConsole.WriteLine("=== BACKGROUND APPS (Isolation CCD) ===");
+        
+                lock (_lock)
+                {
+                    foreach (var a in _config.BackgroundApps) 
+                        _rawConsole.WriteLine($" - {a}");
+                }
+
+                _rawConsole.WriteLine("\n'EXE Name' to Add/Remove, or ENTER to return to menu:");
+        
+                // FIX: Use manual reader
+                string input = ReadInputManually("> ");
+        
+                if (string.IsNullOrEmpty(input) || input.Equals("ESC", StringComparison.OrdinalIgnoreCase))
+                {
+                    Console.Clear();
+                    break;
+                }
+
+                lock (_lock)
+                {
+                    if (!_config.BackgroundApps.Add(input)) 
+                        _config.BackgroundApps.Remove(input);
+                }
+                SaveConfig();
             }
         }
 
@@ -899,77 +915,202 @@ namespace GameOptimizer
         {
             if (hConsole == IntPtr.Zero)
             {
-                AllocConsole(); 
-                hConsole = GetConsoleWindow(); 
-                AdjustConsoleWindowSize(); 
-                var standardOutput = new StreamWriter(Console.OpenStandardOutput()){AutoFlush=true};
-                
+                AllocConsole();
+                hConsole = GetConsoleWindow();
+                AdjustConsoleWindowSize();
+        
+                // Re-capture raw console after allocation
+                _rawConsole = new StreamWriter(Console.OpenStandardOutput()) { AutoFlush = true };
+        
                 if (_config.EnableLogging)
-                    Console.SetOut(new MultiTextWriter(standardOutput, LogPath));
-                else
-                    Console.SetOut(standardOutput);
+                    Console.SetOut(new MultiTextWriter(_rawConsole, LogPath));
             }
-            ShowWindow(hConsole, 5);
-            int cores = Environment.ProcessorCount;
-            if (_ccdMasks.Count == 0) DetectCcdTopology();
-            int maxCoresPerCcd = _ccdMasks.Max(mask => GetPopCount((ulong)mask));
-            ConsoleColor colorRed = ConsoleColor.Red;
-            ConsoleColor colorGreen = ConsoleColor.Green;
-            ConsoleColor colorWhite = ConsoleColor.White;
+            ShowWindow(hConsole, 5); // SW_SHOW
+            
+            IntPtr hInput = GetStdHandle(STD_INPUT_HANDLE);
+            uint prevMode;
+            GetConsoleMode(hInput, out prevMode);
+            if (hInput != IntPtr.Zero && GetConsoleMode(hInput, out prevMode))
+            {
+                SetConsoleMode(hInput, ENABLE_EXTENDED_FLAGS); 
+            }
+            
+            try { InitializeMonitorData(); }
+            catch (Exception ex) { _rawConsole.WriteLine($"Monitor Init Error: {ex.Message}"); Thread.Sleep(2000); }
 
-            while (true) {
-                Console.Clear();
-                Console.WriteLine("=== SETTINGS ===");
-                Console.ForegroundColor = _config.UsePowerOptimization ? colorGreen : colorRed;
-                Console.WriteLine($"  [P] Modify Power Plan: {(_config.UsePowerOptimization ? "ON" : "OFF")}");
-                Console.ForegroundColor = IsAutostartEnabled() ? colorGreen : colorRed;
-                Console.WriteLine($"  [A] Toggle Start with Windows: {(IsAutostartEnabled() ? "ENABLED" : "DISABLED")}");
-                Console.ForegroundColor = IsCustomRegistrySet() ? colorGreen : colorRed;
-                Console.WriteLine($"  [R] Toggle Registry Edits: {( IsCustomRegistrySet() ? "ENABLED" : "DISABLED")}");
-                Console.ForegroundColor = colorWhite;
-                Console.WriteLine($"  [G] Manage Game List ({_config.Apps.Count} apps)");
-                Console.WriteLine($"  [B] Manage Background App List ({_config.BackgroundApps.Count} apps)");
-                Console.WriteLine($"  [M] Monitor CPU Cores");
-                Console.WriteLine("  [0-15]   - Set specific core range");
-                Console.WriteLine("  [Number] - Toggle specific core index");
-                Console.WriteLine("  [S/Ent]  - Save and Return to Background");
-                Console.WriteLine("---------------------------------------"); 
-                Console.WriteLine();
+            int maxRows = _ccdMasks.Max(mask => GetPopCount((ulong)mask));
+            _currentInput = "";
+            Console.CursorVisible = false;
+            _isMenuOpen = true; 
 
-                // Render CCD-Aware Selection Grid
-                for (int row = 0; row < maxCoresPerCcd; row++)
+            while (true)
+            {
+                // 1. COLLECT DATA
+                PdhCollectQueryData(_pdhQuery);
+
+                // 2. RENDER UI
+                Console.SetCursorPosition(0, 0);
+                Console.ForegroundColor = ConsoleColor.White;
+                _rawConsole.WriteLine($"=== CPU REAL-TIME MONITOR | CCDs: {_ccdMasks.Count}  ===");
+
+                _rawConsole.WriteLine("Currently Active Game: ");
+                if (_currentGame.Length != 0)
+                    WriteCurrentGameInfo(_currentGame, _currentGameOptimizeMethod, true);
+                else
+                {
+                    Console.ForegroundColor = ConsoleColor.DarkGray;
+                    _rawConsole.WriteLine("No game detected. Waiting for tagged game to launch...\n".PadRight(Console.WindowWidth));
+                }
+                
+                
+                for (int c = 0; c < _ccdMasks.Count; c++)
+                {
+                    if(c == 0)
+                        _rawConsole.Write($"{"CCD " + c + " (L3)",-36} | ");
+                    else
+                        _rawConsole.Write($"{"CCD " + c,-36} | ");
+                }
+                _rawConsole.WriteLine("\n" + new string('-', 38 * _ccdMasks.Count));
+                Console.ResetColor();
+
+                // Render CCD Grid with Real-Time Stats
+                for (int row = 0; row < maxRows; row++)
                 {
                     for (int ccdIdx = 0; ccdIdx < _ccdMasks.Count; ccdIdx++)
                     {
                         int coreIdx = GetCoreIndexInCcd(ccdIdx, row);
                         if (coreIdx != -1)
                         {
+                            PdhGetFormattedCounterValue(_pdhUsageCounters![coreIdx], 0x00000200, out _, out var utilVal);
+                            double util = utilVal.doubleValue;
+                            double mhz = (util / 100.0) * _baseClockMHz;
+                            double displayLoad = Math.Clamp(util, 0, 100);
+                            
+                            ConsoleColor color = ConsoleColor.Green;
+                            if (displayLoad > 80) color = ConsoleColor.Red;
+                            else if (displayLoad > 40) color = ConsoleColor.Yellow;
                             bool isSet = (_config.AffinityMask & (1L << coreIdx)) != 0;
-                            string status = isSet ? "[X]" : "[ ]";
-                            Console.ForegroundColor = isSet ? colorGreen : colorWhite;
-                            Console.Write($"{status} Core {coreIdx:D2}                     ".Substring(0, 31) + " | ");
+                            if (isSet) { Console.ForegroundColor = ConsoleColor.Cyan; Console.Write("[X] "); }
+                            else { Console.ForegroundColor = ConsoleColor.DarkGray; Console.Write("[ ] "); }
+                            
+                            Console.ForegroundColor = ConsoleColor.Gray;
+                            _rawConsole.Write($"C{coreIdx:D2}[");
+                            
+                            Console.ForegroundColor = color;
+                            int filled = (int)Math.Round(displayLoad / 10.0);
+                            _rawConsole.Write(new string('|', filled).PadRight(10, '.'));
+                            
+                            Console.ForegroundColor = ConsoleColor.Gray;
+                            _rawConsole.Write($"] ");
+
+                            Console.ForegroundColor = color;
+                            _rawConsole.Write($"{displayLoad,5:F1}% ");
+                            
+                            Console.ForegroundColor = ConsoleColor.White;
+                            _rawConsole.Write($"{Math.Clamp(mhz, 0, 9999),4:F0} MHz");
+                            
+                            Console.ForegroundColor = ConsoleColor.DarkGray;
+                            _rawConsole.Write(" | ");
                         }
-                        else { Console.Write(new string(' ', 31) + " | "); }
+                        else { _rawConsole.Write(new string(' ', 38) + " | "); }
                     }
-                    Console.WriteLine();
+                    _rawConsole.WriteLine();
+                    Console.ResetColor();
                 }
-                Console.ForegroundColor = colorWhite;
-                Console.Write("Input: ");
-                string input = Console.ReadLine()?.Trim().ToUpper() ?? "";
-                if (input == "S" || input == "") break;
-                else if (input == "G") ManageGameList();
-                else if (input == "B") ManageBackgroundList();
-                else if (input == "A") ToggleAutostart();
-                else if (input == "M") ShowCoreMonitor(hConsole);
-                else if (input == "R") SetRegistryTweaks(!IsCustomRegistrySet());
-                else if (input == "P") { _config.UsePowerOptimization = !_config.UsePowerOptimization; if (!_config.UsePowerOptimization) DeleteCustomPowerPlan(); }
-                else if (input.Contains("-")) _config.AffinityMask = ParseRange(input, cores); 
-                else if (int.TryParse(input, out int idx) && idx >= 0 && idx < cores) _config.AffinityMask ^= (1L << idx);
+                _rawConsole.WriteLine(new string('-', 38 * _ccdMasks.Count));
+                
+                Console.ForegroundColor = _config.UsePowerOptimization ? ConsoleColor.Green : ConsoleColor.Red;
+                _rawConsole.WriteLine($"  [P] Modify Power Plan: {(_config.UsePowerOptimization ? "ON " : "OFF")}");
+                Console.ForegroundColor = IsAutostartEnabled() ? ConsoleColor.Green : ConsoleColor.Red;
+                _rawConsole.WriteLine($"  [A] Toggle Start with Windows: {(IsAutostartEnabled() ? "ENABLED " : "DISABLED")}");
+                Console.ForegroundColor = IsCustomRegistrySet() ? ConsoleColor.Green : ConsoleColor.Red;
+                _rawConsole.WriteLine($"  [R] Toggle Registry Edits: {( IsCustomRegistrySet() ? "ENABLED " : "DISABLED")}");
+                Console.ForegroundColor = ConsoleColor.White;
+                _rawConsole.WriteLine($"  [G] Manage Game List ({_config.Apps.Count} apps)");
+                _rawConsole.WriteLine($"  [B] Manage Background App List ({_config.BackgroundApps.Count} apps)");
+                _rawConsole.WriteLine("  [0-15]   - Set specific core range");
+                _rawConsole.WriteLine("  [Number] - Toggle specific core index");
+                _rawConsole.WriteLine("  [S/Ent]  - Save and Return to Background");
+                _rawConsole.WriteLine("" + new string('-', 38 * _ccdMasks.Count));
+                
+                _rawConsole.Write("> Input: " + _currentInput);
+                
+                DateTime frameEnd = DateTime.Now.AddMilliseconds(500);
+                while (DateTime.Now < frameEnd)
+                {
+                    if (Console.KeyAvailable)
+                    {
+                        var key = Console.ReadKey(true);
+                        if (key.Key == ConsoleKey.Enter)
+                        {
+                            string cmd = _currentInput.ToUpper().Trim();
+                            _currentInput = ""; 
+                            
+                            if (cmd == "S" || (cmd == "" && _currentInput == "")) goto ExitLoop;
+                            
+                            if (HandleMenuCommand(cmd)) 
+                            {
+                                lock (_lock) _alreadySetStates.Clear();
+                                RebuildCpuSetCache();
+                                SaveConfig();
+                            }
+                            break; 
+                        }
+                        else if (key.Key == ConsoleKey.Backspace)
+                        {
+                            if (_currentInput.Length > 0) _currentInput = _currentInput.Substring(0, _currentInput.Length - 1);
+
+                            Console.SetCursorPosition(0, Console.CursorTop);
+                            _rawConsole.Write(("> Input: " + _currentInput).PadRight(Console.WindowWidth - 1));
+                        }
+                        else if (!char.IsControl(key.KeyChar))
+                        {
+                            _currentInput += key.KeyChar;
+                            Console.SetCursorPosition(0, Console.CursorTop);
+                            _rawConsole.Write("> Input: " + _currentInput);
+                        }
+                    }
+                    Thread.Sleep(5); 
+                }
             }
-            lock (_lock) _alreadySetStates.Clear();
-            RebuildCpuSetCache();
+
+            ExitLoop:
+            _isMenuOpen = false;
             SaveConfig();
+            _currentInput = "";
+            Console.CursorVisible = true;
+            Console.Clear();
             ShowWindow(hConsole, 0);
+            if (hInput != IntPtr.Zero) SetConsoleMode(hInput, prevMode);
+        }
+
+        private static bool HandleMenuCommand(string input)
+        {
+            if (input == "G") { ManageGameList(); return true; }
+            if (input == "B") { ManageBackgroundList(); return true; }
+            if (input == "A") { ToggleAutostart(); return true; }
+            if (input == "R") { SetRegistryTweaks(!IsCustomRegistrySet()); return true; }
+            if (input == "P") { 
+                _config.UsePowerOptimization = !_config.UsePowerOptimization; 
+                if (!_config.UsePowerOptimization) DeleteCustomPowerPlan(); 
+                return true; 
+            }
+            if (input.Contains("-"))
+            {
+                long newMask = ParseRange(input, Environment.ProcessorCount);
+                if(newMask == _config.AffinityMask)
+                    _config.AffinityMask = 0;
+                else
+                    _config.AffinityMask = ParseRange(input, Environment.ProcessorCount);
+                return true;
+            }
+
+            if (int.TryParse(input, out int idx) && idx >= 0 && idx < Environment.ProcessorCount)
+            {
+                _config.AffinityMask ^= (1L << idx);
+                return true;
+            }
+            return false;
         }
 
         private static long ParseRange(string input, int max)
