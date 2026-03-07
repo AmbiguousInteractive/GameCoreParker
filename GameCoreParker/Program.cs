@@ -828,8 +828,7 @@ namespace GameOptimizer
                 string joinedNames = string.Join(", ", Enum.GetNames(typeof(OptimizeMethod)));
                 _rawConsole.WriteLine($"\nAvailable Methods: {joinedNames}");
                 _rawConsole.WriteLine("'EXE Name' to remove, or 'EXE Name:Method' to add (e.g. Cemu:CpuSet)");
-        
-                // FIX: Use manual reader instead of ReadLine
+
                 string input = ReadInputManually("ENTER to return or Type Command: ");
         
                 if (string.IsNullOrEmpty(input) || input.Equals("ESC", StringComparison.OrdinalIgnoreCase))
@@ -846,12 +845,12 @@ namespace GameOptimizer
                         if (p.Length == 2 && Enum.TryParse<OptimizeMethod>(p[1], true, out var m))
                         {
                             _config.Apps[p[0]] = m;
-                            ApplyIfeoRegistry(p[0]); // Fixed: Pass 'true' to enable
+                            ApplyIfeoRegistry(p[0]);
                         }
                     }
                     else if (_config.Apps.Remove(input))
                     {
-                        RemoveIfeoRegistry(input); // Fixed: Pass 'false' to remove
+                        RemoveIfeoRegistry(input);
                     }
                 }
                 SaveConfig();
@@ -892,8 +891,6 @@ namespace GameOptimizer
                 }
 
                 _rawConsole.WriteLine("\n'EXE Name' to Add/Remove, or ENTER to return to menu:");
-        
-                // FIX: Use manual reader
                 string input = ReadInputManually("> ");
         
                 if (string.IsNullOrEmpty(input) || input.Equals("ESC", StringComparison.OrdinalIgnoreCase))
@@ -972,8 +969,7 @@ namespace GameOptimizer
                 }
                 _rawConsole.WriteLine("\n" + new string('-', 38 * _ccdMasks.Count));
                 Console.ResetColor();
-
-                // Render CCD Grid with Real-Time Stats
+                
                 for (int row = 0; row < maxRows; row++)
                 {
                     for (int ccdIdx = 0; ccdIdx < _ccdMasks.Count; ccdIdx++)
