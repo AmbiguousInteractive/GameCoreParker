@@ -25,7 +25,6 @@ namespace GameOptimizer
         [DllImport("kernel32.dll", SetLastError = true)] private static extern bool SetConsoleMode(IntPtr hConsoleHandle, uint dwMode);
         [DllImport("kernel32.dll", SetLastError = true)] private static extern IntPtr GetStdHandle(int nStdHandle);
         
-        private const uint ENABLE_QUICK_EDIT_MODE = 0x0040;
         private const uint ENABLE_EXTENDED_FLAGS = 0x0080;
         private const int STD_INPUT_HANDLE = -10;
 
@@ -37,6 +36,7 @@ namespace GameOptimizer
         [DllImport("kernel32.dll", SetLastError = true)] private static extern bool CloseHandle(IntPtr hObject);
         [DllImport("psapi.dll")] private static extern bool EmptyWorkingSet(IntPtr hProcess);
         [DllImport("kernel32.dll", SetLastError = true)] private static extern bool GetSystemCpuSetInformation(IntPtr Information, uint BufferLength, out uint ReturnedLength, IntPtr Process, uint Flags);
+        [DllImport("kernel32.dll", SetLastError = true)] private static extern bool GetLogicalProcessorInformationEx(uint relationshipType, IntPtr buffer, ref uint returnedLength);
 
         // --- Power Management Imports ---
         [DllImport("powrprof.dll")] private static extern uint PowerSetActiveScheme(IntPtr root, ref Guid schemeGuid);
@@ -48,21 +48,13 @@ namespace GameOptimizer
         [DllImport("powrprof.dll")] private static extern uint PowerDeleteScheme(IntPtr root, ref Guid scheme);
         [DllImport("powrprof.dll")] private static extern uint PowerEnumerate(IntPtr root, IntPtr scheme, IntPtr sub, uint flags, uint index, ref Guid buffer, ref uint bufSize);
         
-        [DllImport("pdh.dll", SetLastError = true, CharSet = CharSet.Unicode)]
-        private static extern uint PdhOpenQuery(IntPtr szDataSource, IntPtr dwUserData, out IntPtr phQuery);
-        [DllImport("pdh.dll", SetLastError = true, CharSet = CharSet.Unicode)]
-        private static extern uint PdhAddCounter(IntPtr hQuery, string szFullCounterPath, IntPtr dwUserData, out IntPtr phCounter);
-        [DllImport("pdh.dll", SetLastError = true)]
-        private static extern uint PdhCollectQueryData(IntPtr hQuery);
-        [DllImport("pdh.dll", SetLastError = true)]
-        private static extern uint PdhGetFormattedCounterValue(IntPtr hCounter, uint dwFormat, out uint lpdwType, out PDH_FMT_COUNTERVALUE pValue);
-        [DllImport("pdh.dll", SetLastError = true)]
-        private static extern uint PdhCloseQuery(IntPtr hQuery);
-        [DllImport("pdh.dll", SetLastError = true, CharSet = CharSet.Unicode, EntryPoint = "PdhAddEnglishCounterW")]
-        private static extern uint PdhAddEnglishCounter(IntPtr hQuery, string szFullCounterPath, IntPtr dwUserData, out IntPtr phCounter);
+        [DllImport("pdh.dll", SetLastError = true, CharSet = CharSet.Unicode)] private static extern uint PdhOpenQuery(IntPtr szDataSource, IntPtr dwUserData, out IntPtr phQuery);
+        [DllImport("pdh.dll", SetLastError = true, CharSet = CharSet.Unicode)] private static extern uint PdhAddCounter(IntPtr hQuery, string szFullCounterPath, IntPtr dwUserData, out IntPtr phCounter);
+        [DllImport("pdh.dll", SetLastError = true)] private static extern uint PdhCollectQueryData(IntPtr hQuery);
+        [DllImport("pdh.dll", SetLastError = true)] private static extern uint PdhGetFormattedCounterValue(IntPtr hCounter, uint dwFormat, out uint lpdwType, out PDH_FMT_COUNTERVALUE pValue);
+        [DllImport("pdh.dll", SetLastError = true)] private static extern uint PdhCloseQuery(IntPtr hQuery);
+        [DllImport("pdh.dll", SetLastError = true, CharSet = CharSet.Unicode, EntryPoint = "PdhAddEnglishCounterW")] private static extern uint PdhAddEnglishCounter(IntPtr hQuery, string szFullCounterPath, IntPtr dwUserData, out IntPtr phCounter);
         
-        [DllImport("kernel32.dll", SetLastError = true)]
-        private static extern bool GetLogicalProcessorInformationEx(uint relationshipType, IntPtr buffer, ref uint returnedLength);
         
         [StructLayout(LayoutKind.Sequential)]
         public struct GROUP_AFFINITY
@@ -101,6 +93,13 @@ namespace GameOptimizer
             [FieldOffset(8)] public double doubleValue; // We use double for percentages
         }
         
+        public class CcdInfo
+        {
+            public long Mask { get; set; }
+            public uint L3Size { get; set; }
+            public string Tag { get; set; } = "";
+        }
+        
         // Power GUIDs
         private static Guid GUID_BALANCED = new Guid("381b4222-f694-41f0-9685-ff5bb260df2e");
         private static Guid GUID_HIGH_PERF = new Guid("8c5e7fda-e8bf-4a96-9a85-a6e23a8c635c");
@@ -129,7 +128,6 @@ namespace GameOptimizer
         private const string IFEO_PATH = @"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Image File Execution Options";
         
         private const string POWER_PLAN_NAME = "GameCoreParker Performance";
-        private const int STD_OUTPUT_HANDLE = -11;
 
         [StructLayout(LayoutKind.Sequential)]
         private struct NativeMsg { public IntPtr handle; public uint message; public IntPtr wParam; public IntPtr lParam; public uint time; public System.Drawing.Point p; }
@@ -143,7 +141,7 @@ namespace GameOptimizer
         private static bool _isPowerPlanActive = false;
         private static bool _backgroundIsolated = false; // Track background app state
         private static Guid _systemFoundGuid = Guid.Empty;
-        private static List<long> _ccdMasks = new();
+        private static List<CcdInfo> _ccds = new();
         
         private const int WM_HOTKEY = 0x0312;
         private const int HOTKEY_AFFINITY_TAG_ID = 1;
@@ -220,7 +218,7 @@ namespace GameOptimizer
                 RebuildCpuSetCache();
                 FindOrCreatePowerPlan();
                 
-                Console.WriteLine("GameCoreParker active. Use Ctrl+Alt+9 (Affinity Mode) / Ctrl+Alt+0 (CPUSet Mode) to tag apps and Ctrl+Alt+T for settings.");
+                Console.WriteLine("GameCoreParker active. Use Ctrl+Alt+9 (Affinity Mode) / Ctrl+Alt+0 (CPUSet Mode) to tag apps, or Ctrl+Alt+8 to inverse the game's used mask, and Ctrl+Alt+T for settings.");
                 using Timer timer = new Timer(MonitorProcesses, null, 0, 5000);
 
                 NativeMsg msg = new NativeMsg();
@@ -307,7 +305,7 @@ namespace GameOptimizer
         private static void InitializeMonitorData()
         {
             if (_pdhUsageCounters != null) return;
-            if (_ccdMasks.Count == 0) DetectCcdTopology();
+            if (_ccds.Count == 0) DetectCcdTopology();
             
             using (var key = Registry.LocalMachine.OpenSubKey(@"HARDWARE\DESCRIPTION\System\CentralProcessor\0"))
                 _baseClockMHz = Convert.ToSingle(key?.GetValue("~MHz") ?? 4300);
@@ -331,10 +329,9 @@ namespace GameOptimizer
         
         private static void DetectCcdTopology()
         {
-            _ccdMasks.Clear();
+            _ccds.Clear();
             uint returnLength = 0;
-
-            GetLogicalProcessorInformationEx(2, IntPtr.Zero, ref returnLength);
+            GetLogicalProcessorInformationEx(2, IntPtr.Zero, ref returnLength); 
 
             IntPtr buffer = Marshal.AllocHGlobal((int)returnLength);
             try
@@ -349,17 +346,35 @@ namespace GameOptimizer
                 
                         if (cacheInfo.Level == 3)
                         {
-                            _ccdMasks.Add((long)cacheInfo.GroupMask.Mask);
+                            _ccds.Add(new CcdInfo { 
+                                Mask = (long)cacheInfo.GroupMask.Mask, 
+                                L3Size = cacheInfo.CacheSize 
+                            });
                         }
                         offset += (int)info.Size;
                     }
                 }
             }
             finally { Marshal.FreeHGlobal(buffer); }
-            if (_ccdMasks.Count == 0)
+
+            if (_ccds.Count == 0)
+                _ccds.Add(new CcdInfo { Mask = (1L << Environment.ProcessorCount) - 1, L3Size = 0 });
+            
+            if (_ccds.Count > 1)
             {
-                _ccdMasks.Add((1L << Environment.ProcessorCount) - 1);
+                uint maxL3 = _ccds.Max(c => c.L3Size);
+                uint minL3 = _ccds.Min(c => c.L3Size);
+
+                foreach (var ccd in _ccds)
+                {
+                    if (maxL3 != minL3)
+                        ccd.Tag = (ccd.L3Size == maxL3) ? "(CACHE)" : "(FREQ)";
+                    else
+                        ccd.Tag = ""; 
+                }
             }
+            else if (_ccds.Count == 1 && _ccds[0].L3Size > 32 * 1024 * 1024)
+                _ccds[0].Tag = "(CACHE)";
         }
         
         private static int GetPopCount(ulong value)
@@ -384,7 +399,7 @@ namespace GameOptimizer
 
         private static int GetCoreIndexInCcd(int ccdIdx, int coreInCcd)
         {
-            long mask = _ccdMasks[ccdIdx];
+            long mask = _ccds[ccdIdx].Mask; // Changed from _ccdMasks
             int count = 0;
             for (int i = 0; i < 64; i++)
             {
@@ -827,9 +842,9 @@ namespace GameOptimizer
                 Console.ForegroundColor = ConsoleColor.White;
                 string joinedNames = string.Join(", ", Enum.GetNames(typeof(OptimizeMethod)));
                 _rawConsole.WriteLine($"\nAvailable Methods: {joinedNames}");
-                _rawConsole.WriteLine("'EXE Name' to remove, or 'EXE Name:Method' to add (e.g. Cemu:CpuSet)");
+                _rawConsole.WriteLine("\n'EXE Name' to remove, or 'EXE Name:Method' to add (e.g. Cemu:CpuSet)");
 
-                string input = ReadInputManually("ENTER to return or Type Command: ");
+                string input = ReadInputManually("\nENTER to return or Type Command: ");
         
                 if (string.IsNullOrEmpty(input) || input.Equals("ESC", StringComparison.OrdinalIgnoreCase))
                 {
@@ -915,8 +930,7 @@ namespace GameOptimizer
                 AllocConsole();
                 hConsole = GetConsoleWindow();
                 AdjustConsoleWindowSize();
-        
-                // Re-capture raw console after allocation
+      
                 _rawConsole = new StreamWriter(Console.OpenStandardOutput()) { AutoFlush = true };
         
                 if (_config.EnableLogging)
@@ -935,20 +949,17 @@ namespace GameOptimizer
             try { InitializeMonitorData(); }
             catch (Exception ex) { _rawConsole.WriteLine($"Monitor Init Error: {ex.Message}"); Thread.Sleep(2000); }
 
-            int maxRows = _ccdMasks.Max(mask => GetPopCount((ulong)mask));
+            int maxRows = _ccds.Max(c => GetPopCount((ulong)c.Mask));
             _currentInput = "";
             Console.CursorVisible = false;
             _isMenuOpen = true; 
 
             while (true)
             {
-                // 1. COLLECT DATA
                 PdhCollectQueryData(_pdhQuery);
-
-                // 2. RENDER UI
                 Console.SetCursorPosition(0, 0);
                 Console.ForegroundColor = ConsoleColor.White;
-                _rawConsole.WriteLine($"=== CPU REAL-TIME MONITOR | CCDs: {_ccdMasks.Count}  ===");
+                _rawConsole.WriteLine($"=== CPU REAL-TIME MONITOR | CCDs: {_ccds.Count}  ===");
 
                 _rawConsole.WriteLine("Currently Active Game: ");
                 if (_currentGame.Length != 0)
@@ -960,19 +971,21 @@ namespace GameOptimizer
                 }
                 
                 
-                for (int c = 0; c < _ccdMasks.Count; c++)
+                for (int c = 0; c < _ccds.Count; c++)
                 {
-                    if(c == 0)
-                        _rawConsole.Write($"{"CCD " + c + " (L3)",-36} | ");
-                    else
-                        _rawConsole.Write($"{"CCD " + c,-36} | ");
+                    string label = $"CCD {c}";
+                    if (!string.IsNullOrEmpty(_ccds[c].Tag))
+                    {
+                        label += $" {_ccds[c].Tag}";
+                    }
+                    _rawConsole.Write($"{label,-35} | ");
                 }
-                _rawConsole.WriteLine("\n" + new string('-', 38 * _ccdMasks.Count));
+                _rawConsole.WriteLine("\n" + new string('-', 38 * _ccds.Count));
                 Console.ResetColor();
                 
                 for (int row = 0; row < maxRows; row++)
                 {
-                    for (int ccdIdx = 0; ccdIdx < _ccdMasks.Count; ccdIdx++)
+                    for (int ccdIdx = 0; ccdIdx < _ccds.Count; ccdIdx++)
                     {
                         int coreIdx = GetCoreIndexInCcd(ccdIdx, row);
                         if (coreIdx != -1)
@@ -986,8 +999,8 @@ namespace GameOptimizer
                             if (displayLoad > 80) color = ConsoleColor.Red;
                             else if (displayLoad > 40) color = ConsoleColor.Yellow;
                             bool isSet = (_config.AffinityMask & (1L << coreIdx)) != 0;
-                            if (isSet) { Console.ForegroundColor = ConsoleColor.Cyan; Console.Write("[X] "); }
-                            else { Console.ForegroundColor = ConsoleColor.DarkGray; Console.Write("[ ] "); }
+                            if (isSet) { Console.ForegroundColor = ConsoleColor.Cyan; _rawConsole.Write("[X] "); }
+                            else { Console.ForegroundColor = ConsoleColor.DarkGray; _rawConsole.Write("[ ] "); }
                             
                             Console.ForegroundColor = ConsoleColor.Gray;
                             _rawConsole.Write($"C{coreIdx:D2}[");
@@ -1013,7 +1026,7 @@ namespace GameOptimizer
                     _rawConsole.WriteLine();
                     Console.ResetColor();
                 }
-                _rawConsole.WriteLine(new string('-', 38 * _ccdMasks.Count));
+                _rawConsole.WriteLine(new string('-', 38 * _ccds.Count));
                 
                 Console.ForegroundColor = _config.UsePowerOptimization ? ConsoleColor.Green : ConsoleColor.Red;
                 _rawConsole.WriteLine($"  [P] Modify Power Plan: {(_config.UsePowerOptimization ? "ON " : "OFF")}");
@@ -1027,7 +1040,7 @@ namespace GameOptimizer
                 _rawConsole.WriteLine("  [0-15]   - Set specific core range");
                 _rawConsole.WriteLine("  [Number] - Toggle specific core index");
                 _rawConsole.WriteLine("  [S/Ent]  - Save and Return to Background");
-                _rawConsole.WriteLine("" + new string('-', 38 * _ccdMasks.Count));
+                _rawConsole.WriteLine("" + new string('-', 38 * _ccds.Count));
                 
                 _rawConsole.Write("> Input: " + _currentInput);
                 
