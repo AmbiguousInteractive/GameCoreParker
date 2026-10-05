@@ -1,7 +1,7 @@
 # GameCoreParker
 Manage CPU cores automatically with hotkeys on specific applications (if the window is focused) without the need of drivers, game mode and game bar. Great for X3D multi-CCD CPUs.
 
-<img width="973" height="505" alt="image" src="https://github.com/user-attachments/assets/c2e1d54d-1f3e-4c3f-9c5d-52e1c50cc948" />
+<img width="870" height="665" alt="Screenshot 2026-10-04 222551" src="https://github.com/user-attachments/assets/625453bc-c56e-45bd-a469-14242a3cfe2d" />
 
 # Features:
 
@@ -26,7 +26,8 @@ To tag an application to use these masks, refer to the hotkeys below. Once an ap
 # Hotkeys:
 **ALT + T** = Toggle the currently focused window to be added to the list of applications that'll have their affinities modified
 
-**ALT + A** = Toggle the currently focused window to be added to the list of applications that'll have it set via CPUSet
+**ALT + 9** = Toggle the currently focused window to be added to the list of applications that'll have it set via AffinityMask
+**ALT + 0** = Toggle the currently focused window to be added to the list of applications that'll have it set via CPUSet
 
 **CTRL + ALT + T** = Open the settings console window. 
 _If you wish to more easily exit the app when its hidden in the background, open the settings and then close the app._
