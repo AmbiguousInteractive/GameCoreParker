@@ -24,9 +24,9 @@ To tag an application to use these masks, refer to the hotkeys below. Once an ap
 **Make sure you have set your CPU mask during this set up or else the game will not set any mode.**
 
 # Hotkeys:
-**ALT + T** = Toggle the currently focused window to be added to the list of applications that'll have their affinities modified
 
 **ALT + 9** = Toggle the currently focused window to be added to the list of applications that'll have it set via AffinityMask
+
 **ALT + 0** = Toggle the currently focused window to be added to the list of applications that'll have it set via CPUSet
 
 **CTRL + ALT + T** = Open the settings console window. 
